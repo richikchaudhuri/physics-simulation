@@ -244,3 +244,22 @@ input[type="range"]::-moz-range-thumb {
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
+
+/* Small screens: let the control panel use the available width, shrink the
+   chrome, and keep the bottom hint from overrunning its line. */
+@media (max-width: 540px) {
+  #ui {
+    padding: 12px;
+  }
+
+  .panel {
+    width: calc(100vw - 24px);
+    max-width: 320px;
+  }
+
+  .hint {
+    font-size: 10px;
+    padding: 6px 10px;
+    text-align: center;
+  }
+}

@@ -327,6 +327,14 @@ function buildWorld(n) {
   statCount.textContent = count;
 }
 
+// Frame the camera on the active sim (used on sim load and by Reset View).
+function frameCamera() {
+  camera.position.copy(cfg.camPos);
+  if (cfg.camTarget) controls.target.copy(cfg.camTarget);
+  else controls.target.set(0, cfg.boxed ? simBounds * 0.5 : 0, 0);
+  controls.update();
+}
+
 // Switch to a different sim: reconfigure environment, controls, UI, then build.
 function loadSim(nextKey) {
   if (!SIMS[nextKey]) return;
@@ -372,10 +380,7 @@ function loadSim(nextKey) {
 
   buildWorld(cfg.defaultCount);
 
-  camera.position.copy(cfg.camPos);
-  if (cfg.camTarget) controls.target.copy(cfg.camTarget);
-  else controls.target.set(0, cfg.boxed ? simBounds * 0.5 : 0, 0);
-  controls.update();
+  frameCamera();
 
   if (cfg.hint) hintEl.textContent = cfg.hint;
   for (const b of segBtns) b.classList.toggle('is-active', b.dataset.sim === nextKey);
@@ -399,6 +404,9 @@ const windName = document.getElementById('wind-name');
 const windRow = document.getElementById('wind-row');
 const btnPin = document.getElementById('btn-pin');
 const btnPause = document.getElementById('btn-pause');
+const btnStep = document.getElementById('btn-step');
+const btnView = document.getElementById('btn-view');
+const btnFull = document.getElementById('btn-fullscreen');
 const segBtns = Array.from(document.querySelectorAll('.seg__btn'));
 const hintEl = document.querySelector('.hint');
 
@@ -448,6 +456,26 @@ btnPin.addEventListener('click', () => {
 btnPause.addEventListener('click', () => {
   paused = !paused;
   btnPause.textContent = paused ? 'Play' : 'Pause';
+});
+
+// Step: advance exactly one fixed tick and repaint (handy while paused to scrub
+// chaos/cloth frame by frame).
+btnStep.addEventListener('click', () => {
+  world.step(FIXED);
+  render();
+});
+
+// Reset View: re-frame the camera on the current sim without rebuilding it.
+btnView.addEventListener('click', frameCamera);
+
+// Fullscreen toggle (the resize listener handles the canvas/aspect update).
+// requestFullscreen rejects in sandboxed iframes; swallow that so it's a no-op.
+btnFull.addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen?.().catch(() => {});
+});
+document.addEventListener('fullscreenchange', () => {
+  btnFull.textContent = document.fullscreenElement ? 'Exit Fullscreen' : 'Fullscreen';
 });
 
 // Re-push the current slider/toggle state onto a freshly-built World (reset spins
@@ -708,6 +736,16 @@ if (import.meta.env.DEV) {
       return rodLines
         ? { visible: rodLines.visible, verts: rodGeo.attributes.position.count }
         : null;
+    },
+    cam() {
+      return {
+        pos: [camera.position.x, camera.position.y, camera.position.z],
+        target: [controls.target.x, controls.target.y, controls.target.z],
+      };
+    },
+    moveCam(x, y, z) {
+      camera.position.set(x, y, z);
+      controls.update();
     },
     cloth() {
       if (!clothMesh) return null;
