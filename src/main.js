@@ -75,6 +75,40 @@ const SIMS = {
     camTarget: new THREE.Vector3(0, -1, 0),
     hint: 'Identical pendulums, tiny angle offsets — watch chaos diverge · left-drag to orbit',
   },
+  cloth: {
+    kind: 3,
+    // Count here is the grid resolution R (Rust builds an R×R sheet); the slider
+    // shows it as "Resolution" and the renderer derives R = sqrt(count).
+    defaultCount: 30,
+    minCount: 8,
+    maxCount: 60,
+    countName: 'Resolution',
+    boxed: false,
+    showGrid: false,
+    bobs: false, // the sheet is a deformable mesh, not instanced spheres
+    rods: false,
+    cloth: true,
+    grabbable: false,
+    colorBySpeed: false,
+    centralScale: 1,
+    speedScale: 1,
+    hasGravityParam: true,
+    gravLabel: 'Gravity g',
+    gravMin: 0,
+    gravMax: 20,
+    gravStep: 0.5,
+    gravDefault: 9.81,
+    hasWind: true,
+    windLabel: 'Wind',
+    windMin: 0,
+    windMax: 30,
+    windStep: 0.5,
+    windDefault: 6,
+    hasPin: true,
+    camPos: new THREE.Vector3(5, 1, 11),
+    camTarget: new THREE.Vector3(0, -0.3, 0),
+    hint: 'A pinned mass-spring cloth billowing in the wind · toggle Pin · left-drag to orbit',
+  },
 };
 
 let simKey = 'collisions';
@@ -149,6 +183,20 @@ let rodGeo = null;
 let rodPos = null; // Float32Array backing rodGeo's position attribute
 let rodLines = null;
 
+// Cloth (sim #3): a single deformable triangle mesh whose vertices ARE the WASM
+// particle positions. We copy the position buffer in each frame and recompute
+// normals so lighting follows the billowing surface. DoubleSide so the back of
+// the sheet is lit too when the wind flips it toward the camera.
+const clothMat = new THREE.MeshStandardMaterial({
+  color: 0x6ca0ff,
+  roughness: 0.65,
+  metalness: 0.0,
+  side: THREE.DoubleSide,
+});
+let clothGeo = null;
+let clothPos = null; // Float32Array backing clothGeo's position attribute
+let clothMesh = null;
+
 // Hue ramp by pendulum index (0..n) -> a spread-out rainbow.
 function indexToColor(p, total, out) {
   return out.setHSL((p / Math.max(total, 1)) * 0.92, 0.7, 0.56);
@@ -208,8 +256,43 @@ function updateRods(p) {
   rodGeo.attributes.position.needsUpdate = true;
 }
 
+// (Re)build the cloth mesh for an R×R grid: a flat position buffer (filled each
+// frame from WASM) plus a static triangle index (two tris per quad).
+function buildCloth(R) {
+  if (clothMesh) {
+    scene.remove(clothMesh);
+    clothGeo.dispose();
+    clothMesh = null;
+  }
+  clothPos = new Float32Array(R * R * 3);
+  const index = [];
+  for (let row = 0; row < R - 1; row++) {
+    for (let col = 0; col < R - 1; col++) {
+      const a = row * R + col;
+      const b = row * R + col + 1;
+      const c = (row + 1) * R + col;
+      const d = (row + 1) * R + col + 1;
+      index.push(a, c, b, b, c, d); // two triangles per cell
+    }
+  }
+  clothGeo = new THREE.BufferGeometry();
+  clothGeo.setAttribute('position', new THREE.BufferAttribute(clothPos, 3));
+  clothGeo.setIndex(index);
+  clothMesh = new THREE.Mesh(clothGeo, clothMat);
+  clothMesh.frustumCulled = false; // the sheet swings outside its initial box
+  scene.add(clothMesh);
+}
+
+// Copy the WASM particle positions into the cloth vertices and recompute normals.
+function updateCloth(p) {
+  clothPos.set(p);
+  clothGeo.attributes.position.needsUpdate = true;
+  clothGeo.computeVertexNormals();
+}
+
 // (Re)create the InstancedMesh for the current body count. instanceColor must
-// be fully initialized or untouched instances render black.
+// be fully initialized or untouched instances render black. For sims that render
+// their own geometry (cloth) the instanced spheres are built but hidden.
 function buildMesh() {
   if (mesh) {
     scene.remove(mesh);
@@ -219,10 +302,14 @@ function buildMesh() {
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   for (let i = 0; i < count; i++) mesh.setColorAt(i, BASE_COLOR);
   mesh.instanceColor.needsUpdate = true;
+  mesh.visible = cfg.bobs !== false; // cloth hides the spheres
   scene.add(mesh);
 
   if (cfg.rods) buildRods();
   else if (rodLines) rodLines.visible = false;
+
+  if (cfg.cloth) buildCloth(Math.round(Math.sqrt(count)));
+  else if (clothMesh) clothMesh.visible = false;
 }
 
 // Rebuild the active sim with a new body count (slider / sim switch).
@@ -249,6 +336,7 @@ function loadSim(nextKey) {
   grid.visible = cfg.showGrid;
   box.visible = cfg.boxed;
 
+  countName.textContent = cfg.countName || 'Count';
   countSlider.min = String(cfg.minCount);
   countSlider.max = String(cfg.maxCount);
   countSlider.value = String(cfg.defaultCount);
@@ -266,6 +354,22 @@ function loadSim(nextKey) {
     gravLabel.textContent = cfg.gravDefault.toFixed(1);
   }
 
+  // Wind control (cloth only): same shared-default trick as gravity.
+  windRow.style.display = cfg.hasWind ? '' : 'none';
+  if (cfg.hasWind) {
+    windName.textContent = cfg.windLabel;
+    windSlider.min = String(cfg.windMin);
+    windSlider.max = String(cfg.windMax);
+    windSlider.step = String(cfg.windStep);
+    windSlider.value = String(cfg.windDefault);
+    windLabel.textContent = cfg.windDefault.toFixed(1);
+  }
+
+  // Pin toggle (cloth only): always starts at corners-pinned.
+  pinMode = 0;
+  btnPin.style.display = cfg.hasPin ? '' : 'none';
+  if (cfg.hasPin) btnPin.textContent = 'Pin: Corners';
+
   buildWorld(cfg.defaultCount);
 
   camera.position.copy(cfg.camPos);
@@ -282,18 +386,25 @@ const statCount = document.getElementById('stat-count');
 const statFps = document.getElementById('stat-fps');
 const countSlider = document.getElementById('count-slider');
 const countLabel = document.getElementById('count-label');
+const countName = document.getElementById('count-name');
 const speedSlider = document.getElementById('speed-slider');
 const speedLabel = document.getElementById('speed-label');
 const gravSlider = document.getElementById('grav-slider');
 const gravLabel = document.getElementById('grav-label');
 const gravName = document.getElementById('grav-name');
 const gravRow = document.getElementById('grav-row');
+const windSlider = document.getElementById('wind-slider');
+const windLabel = document.getElementById('wind-label');
+const windName = document.getElementById('wind-name');
+const windRow = document.getElementById('wind-row');
+const btnPin = document.getElementById('btn-pin');
 const btnPause = document.getElementById('btn-pause');
 const segBtns = Array.from(document.querySelectorAll('.seg__btn'));
 const hintEl = document.querySelector('.hint');
 
 let speed = 1; // sim-time multiplier
 let paused = false;
+let pinMode = 0; // cloth pin mode: 0 = corners, 1 = top edge
 
 for (const b of segBtns) {
   b.addEventListener('click', () => loadSim(b.dataset.sim));
@@ -315,9 +426,23 @@ speedSlider.addEventListener('input', () => {
 gravSlider.addEventListener('input', () => {
   const g = parseFloat(gravSlider.value);
   gravLabel.textContent = g.toFixed(1);
-  // id 0 is each sim's primary tunable: gravity multiplier (collisions) or
-  // gravitational constant G (n-body).
+  // id 0 is each sim's primary tunable: gravity multiplier (collisions),
+  // gravitational constant G (n-body), or gravity g (pendulum / cloth).
   world.set_param(0, g);
+});
+
+// Wind strength (cloth): id 1.
+windSlider.addEventListener('input', () => {
+  const w = parseFloat(windSlider.value);
+  windLabel.textContent = w.toFixed(1);
+  world.set_param(1, w);
+});
+
+// Pin mode toggle (cloth): id 2, 0 = corners, 1 = whole top edge.
+btnPin.addEventListener('click', () => {
+  pinMode = pinMode === 0 ? 1 : 0;
+  world.set_param(2, pinMode);
+  btnPin.textContent = pinMode === 1 ? 'Pin: Top Edge' : 'Pin: Corners';
 });
 
 btnPause.addEventListener('click', () => {
@@ -325,7 +450,18 @@ btnPause.addEventListener('click', () => {
   btnPause.textContent = paused ? 'Play' : 'Pause';
 });
 
-document.getElementById('btn-reset').addEventListener('click', () => world.reset());
+// Re-push the current slider/toggle state onto a freshly-built World (reset spins
+// up a new sim at its built-in defaults, which can drift from the live controls).
+function reapplyParams() {
+  if (cfg.hasGravityParam) world.set_param(0, parseFloat(gravSlider.value));
+  if (cfg.hasWind) world.set_param(1, parseFloat(windSlider.value));
+  if (cfg.hasPin) world.set_param(2, pinMode);
+}
+
+document.getElementById('btn-reset').addEventListener('click', () => {
+  world.reset();
+  reapplyParams();
+});
 
 // --- grab & throw ---------------------------------------------------------
 const raycaster = new THREE.Raycaster();
@@ -479,22 +615,26 @@ function render() {
   const recolor = ex || byIndex;
   const cs = cfg.centralScale;
   const pend = count / 2; // only used for pendulum index coloring
-  for (let i = 0; i < count; i++) {
-    const k = i * 3;
-    dummy.position.set(p[k], p[k + 1], p[k + 2]);
-    dummy.scale.setScalar(simRadius * (cs > 1 && i === 0 ? cs : 1));
-    dummy.updateMatrix();
-    mesh.setMatrixAt(i, dummy.matrix);
-    if (recolor) {
-      if (i === grabbed) tmpColor.copy(HELD_COLOR);
-      else if (ex) speedToColor(ex[i] / cfg.speedScale, tmpColor);
-      else indexToColor((i / 2) | 0, pend, tmpColor); // two bobs share a pendulum hue
-      mesh.setColorAt(i, tmpColor);
+  // Cloth renders its own mesh; the instanced spheres stay hidden, so skip them.
+  if (cfg.bobs !== false) {
+    for (let i = 0; i < count; i++) {
+      const k = i * 3;
+      dummy.position.set(p[k], p[k + 1], p[k + 2]);
+      dummy.scale.setScalar(simRadius * (cs > 1 && i === 0 ? cs : 1));
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      if (recolor) {
+        if (i === grabbed) tmpColor.copy(HELD_COLOR);
+        else if (ex) speedToColor(ex[i] / cfg.speedScale, tmpColor);
+        else indexToColor((i / 2) | 0, pend, tmpColor); // two bobs share a pendulum hue
+        mesh.setColorAt(i, tmpColor);
+      }
     }
+    mesh.instanceMatrix.needsUpdate = true;
+    if (recolor) mesh.instanceColor.needsUpdate = true;
   }
-  mesh.instanceMatrix.needsUpdate = true;
-  if (recolor) mesh.instanceColor.needsUpdate = true;
   if (cfg.rods && rodLines) updateRods(p);
+  if (cfg.cloth && clothMesh) updateCloth(p);
   controls.update();
   renderer.render(scene, camera);
 }
@@ -568,6 +708,32 @@ if (import.meta.env.DEV) {
       return rodLines
         ? { visible: rodLines.visible, verts: rodGeo.attributes.position.count }
         : null;
+    },
+    cloth() {
+      if (!clothMesh) return null;
+      const p = positions();
+      let topY = -Infinity;
+      let botY = Infinity;
+      let maxZ = -Infinity;
+      let minZ = Infinity;
+      for (let i = 0; i < count; i++) {
+        const y = p[i * 3 + 1];
+        const z = p[i * 3 + 2];
+        if (y > topY) topY = y;
+        if (y < botY) botY = y;
+        if (z > maxZ) maxZ = z;
+        if (z < minZ) minZ = z;
+      }
+      return {
+        visible: clothMesh.visible,
+        meshVisible: mesh.visible,
+        verts: clothGeo.attributes.position.count,
+        tris: clothGeo.index.count / 3,
+        topY,
+        botY,
+        maxZ,
+        minZ,
+      };
     },
     grab(i, x, y, z) {
       world.set_held(i);

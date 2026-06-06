@@ -20,11 +20,12 @@
             <button class="seg__btn is-active" data-sim="collisions">Collisions</button>
             <button class="seg__btn" data-sim="gravity">Gravity</button>
             <button class="seg__btn" data-sim="pendulum">Pendulum</button>
+            <button class="seg__btn" data-sim="cloth">Cloth</button>
           </div>
           <div class="row"><span>Bodies</span><span id="stat-count">&mdash;</span></div>
           <div class="row"><span>FPS</span><span id="stat-fps">&mdash;</span></div>
           <div class="control">
-            <label for="count-slider">Count <span id="count-label">200</span></label>
+            <label for="count-slider"><span id="count-name">Count</span> <span id="count-label">200</span></label>
             <input id="count-slider" type="range" min="2" max="2000" step="1" value="200" />
           </div>
           <div class="control">
@@ -35,10 +36,15 @@
             <label for="grav-slider"><span id="grav-name">Gravity</span> <span id="grav-label">1.0</span></label>
             <input id="grav-slider" type="range" min="0" max="2" step="0.1" value="1" />
           </div>
+          <div class="control" id="wind-row" style="display: none">
+            <label for="wind-slider"><span id="wind-name">Wind</span> <span id="wind-label">6.0</span></label>
+            <input id="wind-slider" type="range" min="0" max="30" step="0.5" value="6" />
+          </div>
           <div class="btn-row">
             <button id="btn-pause" class="btn">Pause</button>
             <button id="btn-reset" class="btn">Reset</button>
           </div>
+          <button id="btn-pin" class="btn" style="display: none">Pin: Corners</button>
         </div>
       </div>
 
