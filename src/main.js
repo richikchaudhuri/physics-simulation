@@ -14,13 +14,18 @@ const SIMS = {
     kind: 0,
     defaultCount: 200,
     minCount: 2,
-    maxCount: 1000,
+    maxCount: 2000, // uniform-grid broad-phase keeps high counts smooth
     boxed: true, // walls + floor box, camera framed on the box
     showGrid: true,
-    colorBySpeed: false,
-    speedScale: 6,
+    colorBySpeed: true, // tint balls by speed (hot = fast)
+    speedScale: 12,
     centralScale: 1,
-    hasGravityParam: false,
+    hasGravityParam: true,
+    gravLabel: 'Gravity',
+    gravMin: 0,
+    gravMax: 2, // multiplier on Earth gravity; 0 = weightless gas
+    gravStep: 0.1,
+    gravDefault: 1,
     camPos: new THREE.Vector3(11, 9, 15),
   },
   gravity: {
@@ -34,6 +39,11 @@ const SIMS = {
     speedScale: 16,
     centralScale: 6, // draw the heavy central body (index 0) larger
     hasGravityParam: true,
+    gravLabel: 'Gravity G',
+    gravMin: 0,
+    gravMax: 3,
+    gravStep: 0.1,
+    gravDefault: 1,
     camPos: new THREE.Vector3(0, 15, 22),
   },
 };
@@ -144,7 +154,18 @@ function loadSim(nextKey) {
   countSlider.max = String(cfg.maxCount);
   countSlider.value = String(cfg.defaultCount);
   countLabel.textContent = String(cfg.defaultCount);
+
+  // The gravity control is shared; each sim relabels/rescales it (and a fresh
+  // World starts at the matching default, so no set_param push is needed here).
   gravRow.style.display = cfg.hasGravityParam ? '' : 'none';
+  if (cfg.hasGravityParam) {
+    gravName.textContent = cfg.gravLabel;
+    gravSlider.min = String(cfg.gravMin);
+    gravSlider.max = String(cfg.gravMax);
+    gravSlider.step = String(cfg.gravStep);
+    gravSlider.value = String(cfg.gravDefault);
+    gravLabel.textContent = cfg.gravDefault.toFixed(1);
+  }
 
   buildWorld(cfg.defaultCount);
 
@@ -164,6 +185,7 @@ const speedSlider = document.getElementById('speed-slider');
 const speedLabel = document.getElementById('speed-label');
 const gravSlider = document.getElementById('grav-slider');
 const gravLabel = document.getElementById('grav-label');
+const gravName = document.getElementById('grav-name');
 const gravRow = document.getElementById('grav-row');
 const btnPause = document.getElementById('btn-pause');
 const segBtns = Array.from(document.querySelectorAll('.seg__btn'));
@@ -191,7 +213,9 @@ speedSlider.addEventListener('input', () => {
 gravSlider.addEventListener('input', () => {
   const g = parseFloat(gravSlider.value);
   gravLabel.textContent = g.toFixed(1);
-  world.set_param(0, g); // id 0 = gravitational constant
+  // id 0 is each sim's primary tunable: gravity multiplier (collisions) or
+  // gravitational constant G (n-body).
+  world.set_param(0, g);
 });
 
 btnPause.addEventListener('click', () => {

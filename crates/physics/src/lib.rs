@@ -44,24 +44,37 @@ impl Rng {
     }
 }
 
-/// Phase 0 placeholder sim: spheres bouncing under gravity inside an open-top box.
-/// Proves the full pipeline (Rust physics -> WASM memory -> instanced render).
+/// Sim #0: spheres colliding inside a closed box. Sphere-sphere elastic
+/// collisions and wall bounces, accelerated by a uniform-grid broad-phase so the
+/// body count scales to thousands. Gravity is tunable (0 = a weightless gas).
 struct Bouncer {
     pos: Vec<f32>,
     vel: Vec<f32>,
+    speed: Vec<f32>, // per-body |v|, exposed via `extra()` for color
     n: usize,
     bounds: f32,
     radius: f32,
+    gravity: f32, // downward accel (m/s^2); set_param scales Earth gravity
     /// Index of the body currently grabbed by the mouse, or -1 when none.
     held: i32,
+    // --- uniform-grid broad-phase (rebuilt each step; no per-step alloc) ---
+    cell: f32,            // cell edge = collision diameter (2 * radius)
+    gdim: usize,          // cells per axis (box is gdim^3 cells)
+    cell_start: Vec<u32>, // CSR offsets into `bucket`, len gdim^3 + 1
+    cursor: Vec<u32>,     // per-cell scatter cursor, len gdim^3
+    bucket: Vec<u32>,     // body indices grouped by cell, len n
 }
 
 impl Bouncer {
     fn new(n: usize) -> Self {
-        let bounds = 4.0;
-        let radius = 0.4;
+        let n = n.max(1);
+        let bounds = 4.0f32;
+        // Shrink the balls as the box fills so packing stays sane (~0.4 at the
+        // 200-body default, smaller for crowds, never microscopic).
+        let radius = (0.4 * (200.0 / n as f32).cbrt()).clamp(0.1, 0.7);
         let mut pos = vec![0.0f32; n * 3];
         let mut vel = vec![0.0f32; n * 3];
+        let speed = vec![0.0f32; n];
         let mut rng = Rng::new(0x9E37_79B9);
         for i in 0..n {
             let k = i * 3;
@@ -72,13 +85,72 @@ impl Bouncer {
             vel[k + 1] = rng.range(-1.0, 4.0);
             vel[k + 2] = rng.range(-3.0, 3.0);
         }
-        Self { pos, vel, n, bounds, radius, held: -1 }
+        // Cell edge = collision diameter, so any overlapping pair lands in the
+        // same or an adjacent cell -> a 3x3x3 neighborhood test suffices.
+        let cell = 2.0 * radius;
+        let gdim = ((2.0 * bounds / cell).ceil() as usize).max(1);
+        let ncells = gdim * gdim * gdim;
+        Self {
+            pos,
+            vel,
+            speed,
+            n,
+            bounds,
+            radius,
+            gravity: 9.81,
+            held: -1,
+            cell,
+            gdim,
+            cell_start: vec![0; ncells + 1],
+            cursor: vec![0; ncells],
+            bucket: vec![0; n],
+        }
+    }
+
+    /// Grid cell index containing body `i` (clamped into the box).
+    #[inline]
+    fn cell_of(&self, i: usize) -> usize {
+        let k = i * 3;
+        let b = self.bounds;
+        let inv = 1.0 / self.cell;
+        let g = self.gdim as i32;
+        // x,z span [-b, b]; y spans [0, 2b] (floor at 0).
+        let cx = (((self.pos[k] + b) * inv) as i32).clamp(0, g - 1);
+        let cy = ((self.pos[k + 1] * inv) as i32).clamp(0, g - 1);
+        let cz = (((self.pos[k + 2] + b) * inv) as i32).clamp(0, g - 1);
+        ((cz * g + cy) * g + cx) as usize
+    }
+
+    /// Counting-sort the bodies into grid cells: fills `cell_start` (CSR offsets)
+    /// and `bucket` (body indices grouped by cell). Allocation-free.
+    fn rebuild_grid(&mut self) {
+        let ncells = self.cell_start.len() - 1;
+        for c in self.cell_start.iter_mut() {
+            *c = 0;
+        }
+        // Tally counts into cell_start[cell + 1].
+        for i in 0..self.n {
+            let c = self.cell_of(i);
+            self.cell_start[c + 1] += 1;
+        }
+        // Prefix-sum: counts -> start offsets.
+        for c in 1..=ncells {
+            self.cell_start[c] += self.cell_start[c - 1];
+        }
+        // Scatter body indices into each cell's slice.
+        self.cursor.copy_from_slice(&self.cell_start[..ncells]);
+        for i in 0..self.n {
+            let c = self.cell_of(i);
+            let slot = self.cursor[c] as usize;
+            self.bucket[slot] = i as u32;
+            self.cursor[c] += 1;
+        }
     }
 }
 
 impl Simulation for Bouncer {
     fn step(&mut self, dt: f32) {
-        let g = -9.81f32;
+        let g = -self.gravity;
         let e_wall = 0.85f32; // wall restitution
         let e_ball = 0.95f32; // ball-ball restitution
         let b = self.bounds;
@@ -98,91 +170,140 @@ impl Simulation for Bouncer {
             self.pos[k + 2] += self.vel[k + 2] * dt;
         }
 
-        // 2) Ball-ball elastic collisions, brute-force O(n^2). Phase 2 will swap
-        //    this for a uniform-grid broad-phase to scale up. Masses are equal
-        //    (inverse mass 1), except a grabbed body has inverse mass 0 so it
-        //    behaves as an immovable obstacle and shoves the others aside.
+        // 2) Ball-ball elastic collisions via a uniform-grid broad-phase: bucket
+        //    the bodies into a grid (cell edge = 2r), then test each body only
+        //    against the 27 cells around it. This turns the old O(n^2) all-pairs
+        //    sweep into ~O(n) for evenly spread bodies. Two relaxation passes
+        //    settle dense stacks; the grid is rebuilt once (corrections are tiny).
+        //    Equal masses (inverse mass 1), except a grabbed body has inverse
+        //    mass 0 so it acts as an immovable obstacle that shoves others aside.
+        self.rebuild_grid();
         let two_r = 2.0 * r;
         let two_r2 = two_r * two_r;
-        for i in 0..n {
-            let ki = i * 3;
-            let im_i = if i as i32 == self.held { 0.0 } else { 1.0 };
-            for j in (i + 1)..n {
-                let kj = j * 3;
-                let dx = self.pos[ki] - self.pos[kj];
-                let dy = self.pos[ki + 1] - self.pos[kj + 1];
-                let dz = self.pos[ki + 2] - self.pos[kj + 2];
-                let d2 = dx * dx + dy * dy + dz * dz;
-                if d2 < two_r2 && d2 > 1e-9 {
-                    let im_j = if j as i32 == self.held { 0.0 } else { 1.0 };
-                    let im_sum = im_i + im_j;
-                    if im_sum == 0.0 {
-                        continue; // both held: nothing movable
-                    }
-                    let dist = d2.sqrt();
-                    let inv = 1.0 / dist;
-                    let nx = dx * inv;
-                    let ny = dy * inv;
-                    let nz = dz * inv;
+        let gd = self.gdim as i32;
+        for _pass in 0..2 {
+            for cz in 0..gd {
+                for cy in 0..gd {
+                    for cx in 0..gd {
+                        let home = ((cz * gd + cy) * gd + cx) as usize;
+                        let hs = self.cell_start[home] as usize;
+                        let he = self.cell_start[home + 1] as usize;
+                        for hi in hs..he {
+                            let i = self.bucket[hi] as usize;
+                            let ki = i * 3;
+                            let im_i = if i as i32 == self.held { 0.0 } else { 1.0 };
+                            // Scan the 3x3x3 neighborhood (clamped to the box).
+                            for dz in -1..=1 {
+                                let nz = cz + dz;
+                                if nz < 0 || nz >= gd {
+                                    continue;
+                                }
+                                for dy in -1..=1 {
+                                    let ny = cy + dy;
+                                    if ny < 0 || ny >= gd {
+                                        continue;
+                                    }
+                                    for dx in -1..=1 {
+                                        let nx = cx + dx;
+                                        if nx < 0 || nx >= gd {
+                                            continue;
+                                        }
+                                        let nb = ((nz * gd + ny) * gd + nx) as usize;
+                                        let ns = self.cell_start[nb] as usize;
+                                        let ne = self.cell_start[nb + 1] as usize;
+                                        for nj in ns..ne {
+                                            let j = self.bucket[nj] as usize;
+                                            if j <= i {
+                                                continue; // dedupe each pair + skip self
+                                            }
+                                            let kj = j * 3;
+                                            let ex = self.pos[ki] - self.pos[kj];
+                                            let ey = self.pos[ki + 1] - self.pos[kj + 1];
+                                            let ez = self.pos[ki + 2] - self.pos[kj + 2];
+                                            let d2 = ex * ex + ey * ey + ez * ez;
+                                            if d2 >= two_r2 || d2 <= 1e-9 {
+                                                continue;
+                                            }
+                                            let im_j =
+                                                if j as i32 == self.held { 0.0 } else { 1.0 };
+                                            let im_sum = im_i + im_j;
+                                            if im_sum == 0.0 {
+                                                continue; // both held: nothing movable
+                                            }
+                                            let dist = d2.sqrt();
+                                            let inv = 1.0 / dist;
+                                            let ux = ex * inv;
+                                            let uy = ey * inv;
+                                            let uz = ez * inv;
 
-                    // Positional correction: split the overlap by inverse mass.
-                    let corr = (two_r - dist) / im_sum;
-                    self.pos[ki] += nx * corr * im_i;
-                    self.pos[ki + 1] += ny * corr * im_i;
-                    self.pos[ki + 2] += nz * corr * im_i;
-                    self.pos[kj] -= nx * corr * im_j;
-                    self.pos[kj + 1] -= ny * corr * im_j;
-                    self.pos[kj + 2] -= nz * corr * im_j;
+                                            // Positional correction split by inverse mass.
+                                            let corr = (two_r - dist) / im_sum;
+                                            self.pos[ki] += ux * corr * im_i;
+                                            self.pos[ki + 1] += uy * corr * im_i;
+                                            self.pos[ki + 2] += uz * corr * im_i;
+                                            self.pos[kj] -= ux * corr * im_j;
+                                            self.pos[kj + 1] -= uy * corr * im_j;
+                                            self.pos[kj + 2] -= uz * corr * im_j;
 
-                    // Impulse along the contact normal (only if approaching).
-                    let rvx = self.vel[ki] - self.vel[kj];
-                    let rvy = self.vel[ki + 1] - self.vel[kj + 1];
-                    let rvz = self.vel[ki + 2] - self.vel[kj + 2];
-                    let vrel = rvx * nx + rvy * ny + rvz * nz;
-                    if vrel < 0.0 {
-                        let jn = -(1.0 + e_ball) * vrel / im_sum;
-                        self.vel[ki] += jn * nx * im_i;
-                        self.vel[ki + 1] += jn * ny * im_i;
-                        self.vel[ki + 2] += jn * nz * im_i;
-                        self.vel[kj] -= jn * nx * im_j;
-                        self.vel[kj + 1] -= jn * ny * im_j;
-                        self.vel[kj + 2] -= jn * nz * im_j;
+                                            // Impulse along the normal (only if approaching).
+                                            let rvx = self.vel[ki] - self.vel[kj];
+                                            let rvy = self.vel[ki + 1] - self.vel[kj + 1];
+                                            let rvz = self.vel[ki + 2] - self.vel[kj + 2];
+                                            let vrel = rvx * ux + rvy * uy + rvz * uz;
+                                            if vrel < 0.0 {
+                                                let jn = -(1.0 + e_ball) * vrel / im_sum;
+                                                self.vel[ki] += jn * ux * im_i;
+                                                self.vel[ki + 1] += jn * uy * im_i;
+                                                self.vel[ki + 2] += jn * uz * im_i;
+                                                self.vel[kj] -= jn * ux * im_j;
+                                                self.vel[kj + 1] -= jn * uy * im_j;
+                                                self.vel[kj + 2] -= jn * uz * im_j;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
         // 3) Box walls (closed box: floor, ceiling, 4 sides). The grabbed body is
-        //    clamped on the JS side, so skip it here.
+        //    clamped on the JS side, so it only gets its speed cached. Cache
+        //    per-body |v| here for the renderer's speed coloring.
         for i in 0..n {
-            if i as i32 == self.held {
-                continue;
-            }
             let k = i * 3;
-            if self.pos[k + 1] < r {
-                self.pos[k + 1] = r;
-                self.vel[k + 1] = -self.vel[k + 1] * e_wall;
+            if i as i32 != self.held {
+                if self.pos[k + 1] < r {
+                    self.pos[k + 1] = r;
+                    self.vel[k + 1] = -self.vel[k + 1] * e_wall;
+                }
+                if self.pos[k + 1] > 2.0 * b - r {
+                    self.pos[k + 1] = 2.0 * b - r;
+                    self.vel[k + 1] = -self.vel[k + 1] * e_wall;
+                }
+                if self.pos[k] < -b + r {
+                    self.pos[k] = -b + r;
+                    self.vel[k] = -self.vel[k] * e_wall;
+                }
+                if self.pos[k] > b - r {
+                    self.pos[k] = b - r;
+                    self.vel[k] = -self.vel[k] * e_wall;
+                }
+                if self.pos[k + 2] < -b + r {
+                    self.pos[k + 2] = -b + r;
+                    self.vel[k + 2] = -self.vel[k + 2] * e_wall;
+                }
+                if self.pos[k + 2] > b - r {
+                    self.pos[k + 2] = b - r;
+                    self.vel[k + 2] = -self.vel[k + 2] * e_wall;
+                }
             }
-            if self.pos[k + 1] > 2.0 * b - r {
-                self.pos[k + 1] = 2.0 * b - r;
-                self.vel[k + 1] = -self.vel[k + 1] * e_wall;
-            }
-            if self.pos[k] < -b + r {
-                self.pos[k] = -b + r;
-                self.vel[k] = -self.vel[k] * e_wall;
-            }
-            if self.pos[k] > b - r {
-                self.pos[k] = b - r;
-                self.vel[k] = -self.vel[k] * e_wall;
-            }
-            if self.pos[k + 2] < -b + r {
-                self.pos[k + 2] = -b + r;
-                self.vel[k + 2] = -self.vel[k + 2] * e_wall;
-            }
-            if self.pos[k + 2] > b - r {
-                self.pos[k + 2] = b - r;
-                self.vel[k + 2] = -self.vel[k + 2] * e_wall;
-            }
+            let vx = self.vel[k];
+            let vy = self.vel[k + 1];
+            let vz = self.vel[k + 2];
+            self.speed[i] = (vx * vx + vy * vy + vz * vz).sqrt();
         }
     }
     fn positions(&self) -> &[f32] {
@@ -217,6 +338,15 @@ impl Simulation for Bouncer {
             self.vel[k] = x;
             self.vel[k + 1] = y;
             self.vel[k + 2] = z;
+        }
+    }
+    fn extra(&self) -> &[f32] {
+        &self.speed
+    }
+    fn set_param(&mut self, id: u32, v: f32) {
+        if id == 0 {
+            // v is a gravity multiplier (1.0 = Earth gravity, 0 = weightless).
+            self.gravity = 9.81 * v.max(0.0);
         }
     }
 }
@@ -420,7 +550,7 @@ impl World {
     pub fn new(kind: u32, n: usize) -> World {
         console_error_panic_hook::set_once();
         let sim: Box<dyn Simulation> = match kind {
-            // Phase 2+ will add: 2 => Particles, 3 => Pendulum, 4 => Cloth
+            // Phase 3+ will add: 2 => Pendulum, 3 => Cloth
             1 => Box::new(NBody::new(n)),
             _ => Box::new(Bouncer::new(n)),
         };
