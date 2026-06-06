@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Physics Sandbox</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <canvas id="scene"></canvas>
+
+    <div id="ui">
+      <div class="panel glass">
+        <h1>Physics Sandbox</h1>
+        <p class="sub">Rust &middot; WebAssembly &middot; Three.js</p>
+        <div class="row"><span>Bodies</span><span id="stat-count">&mdash;</span></div>
+        <div class="row"><span>FPS</span><span id="stat-fps">&mdash;</span></div>
+        <button id="btn-reset" class="glass-btn">Reset</button>
+      </div>
+
+      <div class="hint glass">Left-drag to orbit &middot; scroll to zoom &middot; right-drag to pan</div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,4 @@
+node_modules/
+dist/
+src/physics-pkg/
+crates/physics/target/
