@@ -10,15 +10,23 @@
     <canvas id="scene"></canvas>
 
     <div id="ui">
-      <div class="panel glass">
-        <h1>Physics Sandbox</h1>
-        <p class="sub">Rust &middot; WebAssembly &middot; Three.js</p>
-        <div class="row"><span>Bodies</span><span id="stat-count">&mdash;</span></div>
-        <div class="row"><span>FPS</span><span id="stat-fps">&mdash;</span></div>
-        <button id="btn-reset" class="glass-btn">Reset</button>
+      <div class="panel">
+        <div class="panel__head">
+          <h1>Physics Sandbox</h1>
+          <p class="sub">Rust &middot; WebAssembly &middot; Three.js</p>
+        </div>
+        <div class="panel__body">
+          <div class="row"><span>Bodies</span><span id="stat-count">&mdash;</span></div>
+          <div class="row"><span>FPS</span><span id="stat-fps">&mdash;</span></div>
+          <div class="control">
+            <label for="count-slider">Balls <span id="count-label">200</span></label>
+            <input id="count-slider" type="range" min="2" max="1000" step="1" value="200" />
+          </div>
+          <button id="btn-reset" class="btn">Reset</button>
+        </div>
       </div>
 
-      <div class="hint glass">Left-drag to orbit &middot; scroll to zoom &middot; right-drag to pan</div>
+      <div class="hint">Drag a ball to grab &amp; throw &middot; left-drag empty space to orbit &middot; scroll to zoom</div>
     </div>
 
     <script type="module" src="/src/main.js"></script>

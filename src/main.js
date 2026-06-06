@@ -5,12 +5,12 @@ import { initWasm, World, makePositions } from './wasm.js';
 await initWasm();
 
 // --- simulation -----------------------------------------------------------
-const BODY_COUNT = 200;
-const world = new World(0, BODY_COUNT);
-const positions = makePositions(world);
-const radius = world.radius();
-const bounds = world.bounds();
-const count = world.count();
+let bodyCount = 200;
+let world = new World(0, bodyCount);
+let positions = makePositions(world);
+const radius = world.radius(); // constant across rebuilds
+const bounds = world.bounds(); // constant across rebuilds
+let count = world.count();
 
 // --- renderer / scene -----------------------------------------------------
 const canvas = document.getElementById('scene');
@@ -39,7 +39,7 @@ const key = new THREE.DirectionalLight(0xffffff, 1.3);
 key.position.set(8, 16, 6);
 scene.add(key);
 
-// --- environment: ground grid + open-top box ------------------------------
+// --- environment: ground grid + box ---------------------------------------
 const grid = new THREE.GridHelper(bounds * 2, 20, 0x444444, 0x222222);
 scene.add(grid);
 
@@ -54,21 +54,157 @@ scene.add(box);
 // --- instanced spheres ----------------------------------------------------
 const sphereGeo = new THREE.SphereGeometry(radius, 18, 14);
 const sphereMat = new THREE.MeshStandardMaterial({
-  color: 0xe8e8e8,
+  color: 0xffffff, // actual tint comes from per-instance colors
   roughness: 0.4,
   metalness: 0.1,
 });
-const mesh = new THREE.InstancedMesh(sphereGeo, sphereMat, count);
-mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-scene.add(mesh);
-
+const BASE_COLOR = new THREE.Color(0xe8e8e8);
+const HELD_COLOR = new THREE.Color(0x6ca0ff);
 const dummy = new THREE.Object3D();
+let mesh = null;
+
+// (Re)create the InstancedMesh for the current body count and tint every
+// instance with the base color (instanceColor must be fully initialized or
+// untouched instances render black).
+function buildMesh() {
+  if (mesh) {
+    scene.remove(mesh);
+    mesh.dispose();
+  }
+  mesh = new THREE.InstancedMesh(sphereGeo, sphereMat, count);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  for (let i = 0; i < count; i++) mesh.setColorAt(i, BASE_COLOR);
+  mesh.instanceColor.needsUpdate = true;
+  scene.add(mesh);
+}
+buildMesh();
+
+// Tear down the sim and rebuild it with a new body count (slider).
+function rebuild(n) {
+  releaseGrab(); // drop anything held before the indices change
+  bodyCount = n;
+  if (typeof world.free === 'function') world.free(); // free old WASM instance
+  world = new World(0, bodyCount);
+  positions = makePositions(world);
+  count = world.count();
+  buildMesh();
+  statCount.textContent = count;
+}
 
 // --- ui -------------------------------------------------------------------
 const statCount = document.getElementById('stat-count');
 const statFps = document.getElementById('stat-fps');
+const countSlider = document.getElementById('count-slider');
+const countLabel = document.getElementById('count-label');
 statCount.textContent = count;
+countSlider.value = String(bodyCount);
+countLabel.textContent = String(bodyCount);
+
 document.getElementById('btn-reset').addEventListener('click', () => world.reset());
+
+// Live label while dragging; rebuild only on release so we don't thrash the
+// sim/mesh on every intermediate value.
+countSlider.addEventListener('input', () => {
+  countLabel.textContent = countSlider.value;
+});
+countSlider.addEventListener('change', () => {
+  rebuild(parseInt(countSlider.value, 10));
+});
+
+// --- grab & throw ---------------------------------------------------------
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const dragPlane = new THREE.Plane();
+const hitPoint = new THREE.Vector3();
+const camDir = new THREE.Vector3();
+const instVel = new THREE.Vector3();
+const lastDragPos = new THREE.Vector3();
+const throwVel = new THREE.Vector3();
+let grabbed = -1; // instance id being dragged, -1 = none
+let lastDragTime = 0;
+const MAX_THROW = 40; // cap fling speed (world units / s)
+
+function pointerNDC(e) {
+  const rect = canvas.getBoundingClientRect();
+  ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+}
+
+function clampToBox(v) {
+  const lim = bounds - radius;
+  v.x = Math.max(-lim, Math.min(lim, v.x));
+  v.z = Math.max(-lim, Math.min(lim, v.z));
+  v.y = Math.max(radius, Math.min(2 * bounds - radius, v.y));
+}
+
+function releaseGrab() {
+  if (grabbed < 0) return;
+  mesh.setColorAt(grabbed, BASE_COLOR);
+  mesh.instanceColor.needsUpdate = true;
+  world.set_held(-1);
+  grabbed = -1;
+  controls.enabled = true;
+}
+
+// Capture-phase on window so we run BEFORE OrbitControls' canvas listener; when
+// we grab a ball we stopPropagation so the orbit gesture never starts.
+function onPointerDown(e) {
+  if (e.button !== 0 || e.target !== canvas) return; // left button, on canvas
+  pointerNDC(e);
+  raycaster.setFromCamera(ndc, camera);
+  mesh.computeBoundingSphere(); // matrices are current from the last render()
+  const hits = raycaster.intersectObject(mesh);
+  if (hits.length === 0 || hits[0].instanceId == null) return; // missed -> orbit
+
+  grabbed = hits[0].instanceId;
+  controls.enabled = false;
+  e.stopPropagation();
+
+  world.set_held(grabbed);
+  mesh.setColorAt(grabbed, HELD_COLOR);
+  mesh.instanceColor.needsUpdate = true;
+
+  // Drag plane faces the camera, through the ball's current position, so the
+  // ball tracks the cursor at a constant depth while dragging.
+  const p = positions();
+  const k = grabbed * 3;
+  lastDragPos.set(p[k], p[k + 1], p[k + 2]);
+  camera.getWorldDirection(camDir);
+  dragPlane.setFromNormalAndCoplanarPoint(camDir, lastDragPos);
+  throwVel.set(0, 0, 0);
+  lastDragTime = performance.now();
+}
+
+function onPointerMove(e) {
+  if (grabbed < 0) return;
+  pointerNDC(e);
+  raycaster.setFromCamera(ndc, camera);
+  if (!raycaster.ray.intersectPlane(dragPlane, hitPoint)) return;
+  clampToBox(hitPoint);
+
+  const now = performance.now();
+  const dt = Math.max((now - lastDragTime) / 1000, 1e-3);
+  instVel.copy(hitPoint).sub(lastDragPos).divideScalar(dt);
+  throwVel.lerp(instVel, 0.6); // smooth out cursor jitter
+  lastDragTime = now;
+  lastDragPos.copy(hitPoint);
+
+  world.set_pos(grabbed, hitPoint.x, hitPoint.y, hitPoint.z);
+}
+
+function onPointerUp() {
+  if (grabbed < 0) return;
+  // Releasing after a pause should drop, not fling: ignore stale velocity.
+  if (performance.now() - lastDragTime > 120) throwVel.set(0, 0, 0);
+  if (throwVel.length() > MAX_THROW) throwVel.setLength(MAX_THROW);
+  world.set_vel(grabbed, throwVel.x, throwVel.y, throwVel.z);
+  releaseGrab();
+}
+
+// Capture phase so this runs before OrbitControls' canvas listener.
+window.addEventListener('pointerdown', onPointerDown, true);
+window.addEventListener('pointermove', onPointerMove);
+window.addEventListener('pointerup', onPointerUp);
 
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -144,6 +280,15 @@ if (import.meta.env.DEV) {
       render();
     },
     render,
+    grab(i, x, y, z) {
+      world.set_held(i);
+      world.set_pos(i, x, y, z);
+    },
+    throw(i, vx, vy, vz) {
+      world.set_vel(i, vx, vy, vz);
+      world.set_held(-1);
+    },
+    rebuild,
     sample() {
       const p = positions();
       let minY = Infinity;

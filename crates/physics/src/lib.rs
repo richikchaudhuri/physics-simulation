@@ -13,6 +13,13 @@ pub trait Simulation {
     fn bounds(&self) -> f32 {
         4.0
     }
+    /// Mark body `i` as held by the mouse (-1 = none). A held body is driven by
+    /// JS (`set_pos`) and acts as an infinite-mass obstacle for the rest.
+    fn set_held(&mut self, _i: i32) {}
+    /// Teleport body `i` (used while dragging a grabbed body).
+    fn set_pos(&mut self, _i: usize, _x: f32, _y: f32, _z: f32) {}
+    /// Set body `i` velocity (used to fling a body on release).
+    fn set_vel(&mut self, _i: usize, _x: f32, _y: f32, _z: f32) {}
 }
 
 /// Tiny deterministic LCG so the scene looks the same every load without an rng crate.
@@ -38,6 +45,8 @@ struct Bouncer {
     n: usize,
     bounds: f32,
     radius: f32,
+    /// Index of the body currently grabbed by the mouse, or -1 when none.
+    held: i32,
 }
 
 impl Bouncer {
@@ -56,7 +65,7 @@ impl Bouncer {
             vel[k + 1] = rng.range(-1.0, 4.0);
             vel[k + 2] = rng.range(-3.0, 3.0);
         }
-        Self { pos, vel, n, bounds, radius }
+        Self { pos, vel, n, bounds, radius, held: -1 }
     }
 }
 
@@ -69,8 +78,12 @@ impl Simulation for Bouncer {
         let r = self.radius;
         let n = self.n;
 
-        // 1) Integrate under gravity (semi-implicit Euler).
+        // 1) Integrate under gravity (semi-implicit Euler). The grabbed body is
+        //    positioned by the mouse, so it skips integration.
         for i in 0..n {
+            if i as i32 == self.held {
+                continue;
+            }
             let k = i * 3;
             self.vel[k + 1] += g * dt;
             self.pos[k] += self.vel[k] * dt;
@@ -78,12 +91,15 @@ impl Simulation for Bouncer {
             self.pos[k + 2] += self.vel[k + 2] * dt;
         }
 
-        // 2) Ball-ball elastic collisions (equal mass), brute-force O(n^2).
-        //    Phase 2 will swap this for a uniform-grid broad-phase to scale up.
+        // 2) Ball-ball elastic collisions, brute-force O(n^2). Phase 2 will swap
+        //    this for a uniform-grid broad-phase to scale up. Masses are equal
+        //    (inverse mass 1), except a grabbed body has inverse mass 0 so it
+        //    behaves as an immovable obstacle and shoves the others aside.
         let two_r = 2.0 * r;
         let two_r2 = two_r * two_r;
         for i in 0..n {
             let ki = i * 3;
+            let im_i = if i as i32 == self.held { 0.0 } else { 1.0 };
             for j in (i + 1)..n {
                 let kj = j * 3;
                 let dx = self.pos[ki] - self.pos[kj];
@@ -91,20 +107,25 @@ impl Simulation for Bouncer {
                 let dz = self.pos[ki + 2] - self.pos[kj + 2];
                 let d2 = dx * dx + dy * dy + dz * dz;
                 if d2 < two_r2 && d2 > 1e-9 {
+                    let im_j = if j as i32 == self.held { 0.0 } else { 1.0 };
+                    let im_sum = im_i + im_j;
+                    if im_sum == 0.0 {
+                        continue; // both held: nothing movable
+                    }
                     let dist = d2.sqrt();
                     let inv = 1.0 / dist;
                     let nx = dx * inv;
                     let ny = dy * inv;
                     let nz = dz * inv;
 
-                    // Positional correction: split the overlap so they don't sink.
-                    let push = (two_r - dist) * 0.5;
-                    self.pos[ki] += nx * push;
-                    self.pos[ki + 1] += ny * push;
-                    self.pos[ki + 2] += nz * push;
-                    self.pos[kj] -= nx * push;
-                    self.pos[kj + 1] -= ny * push;
-                    self.pos[kj + 2] -= nz * push;
+                    // Positional correction: split the overlap by inverse mass.
+                    let corr = (two_r - dist) / im_sum;
+                    self.pos[ki] += nx * corr * im_i;
+                    self.pos[ki + 1] += ny * corr * im_i;
+                    self.pos[ki + 2] += nz * corr * im_i;
+                    self.pos[kj] -= nx * corr * im_j;
+                    self.pos[kj + 1] -= ny * corr * im_j;
+                    self.pos[kj + 2] -= nz * corr * im_j;
 
                     // Impulse along the contact normal (only if approaching).
                     let rvx = self.vel[ki] - self.vel[kj];
@@ -112,20 +133,24 @@ impl Simulation for Bouncer {
                     let rvz = self.vel[ki + 2] - self.vel[kj + 2];
                     let vrel = rvx * nx + rvy * ny + rvz * nz;
                     if vrel < 0.0 {
-                        let jn = -(1.0 + e_ball) * vrel * 0.5; // equal masses
-                        self.vel[ki] += jn * nx;
-                        self.vel[ki + 1] += jn * ny;
-                        self.vel[ki + 2] += jn * nz;
-                        self.vel[kj] -= jn * nx;
-                        self.vel[kj + 1] -= jn * ny;
-                        self.vel[kj + 2] -= jn * nz;
+                        let jn = -(1.0 + e_ball) * vrel / im_sum;
+                        self.vel[ki] += jn * nx * im_i;
+                        self.vel[ki + 1] += jn * ny * im_i;
+                        self.vel[ki + 2] += jn * nz * im_i;
+                        self.vel[kj] -= jn * nx * im_j;
+                        self.vel[kj + 1] -= jn * ny * im_j;
+                        self.vel[kj + 2] -= jn * nz * im_j;
                     }
                 }
             }
         }
 
-        // 3) Box walls (closed box: floor, ceiling, 4 sides).
+        // 3) Box walls (closed box: floor, ceiling, 4 sides). The grabbed body is
+        //    clamped on the JS side, so skip it here.
         for i in 0..n {
+            if i as i32 == self.held {
+                continue;
+            }
             let k = i * 3;
             if self.pos[k + 1] < r {
                 self.pos[k + 1] = r;
@@ -167,6 +192,25 @@ impl Simulation for Bouncer {
     }
     fn bounds(&self) -> f32 {
         self.bounds
+    }
+    fn set_held(&mut self, i: i32) {
+        self.held = i;
+    }
+    fn set_pos(&mut self, i: usize, x: f32, y: f32, z: f32) {
+        let k = i * 3;
+        if k + 2 < self.pos.len() {
+            self.pos[k] = x;
+            self.pos[k + 1] = y;
+            self.pos[k + 2] = z;
+        }
+    }
+    fn set_vel(&mut self, i: usize, x: f32, y: f32, z: f32) {
+        let k = i * 3;
+        if k + 2 < self.vel.len() {
+            self.vel[k] = x;
+            self.vel[k + 1] = y;
+            self.vel[k + 2] = z;
+        }
     }
 }
 
@@ -217,5 +261,21 @@ impl World {
 
     pub fn reset(&mut self) {
         self.sim.reset();
+    }
+
+    /// Grab body `i` with the mouse (-1 releases). While held it is moved by JS
+    /// via `set_pos` and acts as an immovable obstacle for the other bodies.
+    pub fn set_held(&mut self, i: i32) {
+        self.sim.set_held(i);
+    }
+
+    /// Teleport body `i` to (x, y, z) — used while dragging a grabbed body.
+    pub fn set_pos(&mut self, i: usize, x: f32, y: f32, z: f32) {
+        self.sim.set_pos(i, x, y, z);
+    }
+
+    /// Set the velocity of body `i` — used to fling a body on release.
+    pub fn set_vel(&mut self, i: usize, x: f32, y: f32, z: f32) {
+        self.sim.set_vel(i, x, y, z);
     }
 }
