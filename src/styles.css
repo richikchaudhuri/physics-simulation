@@ -81,6 +81,43 @@ body {
   letter-spacing: 0.2em;
 }
 
+/* Boxy segmented sim switcher: shared border, inverted active tab. */
+.seg {
+  display: flex;
+  border: 1px solid var(--line);
+  margin-bottom: 14px;
+}
+
+.seg__btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  padding: 8px 4px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.seg__btn + .seg__btn {
+  border-left: 1px solid var(--line);
+}
+
+.seg__btn:hover {
+  color: var(--ink);
+}
+
+.seg__btn.is-active {
+  background: var(--ink);
+  color: #0a0a0c;
+  font-weight: 700;
+}
+
 .row {
   display: flex;
   justify-content: space-between;
@@ -171,6 +208,16 @@ input[type="range"]::-moz-range-thumb {
 
 .btn:active {
   background: rgba(255, 255, 255, 0.14);
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.btn-row .btn {
+  margin-top: 0;
 }
 
 .hint {

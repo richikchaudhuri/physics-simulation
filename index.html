@@ -16,17 +16,32 @@
           <p class="sub">Rust &middot; WebAssembly &middot; Three.js</p>
         </div>
         <div class="panel__body">
+          <div class="seg" id="sim-switch">
+            <button class="seg__btn is-active" data-sim="collisions">Collisions</button>
+            <button class="seg__btn" data-sim="gravity">Gravity</button>
+          </div>
           <div class="row"><span>Bodies</span><span id="stat-count">&mdash;</span></div>
           <div class="row"><span>FPS</span><span id="stat-fps">&mdash;</span></div>
           <div class="control">
-            <label for="count-slider">Balls <span id="count-label">200</span></label>
+            <label for="count-slider">Count <span id="count-label">200</span></label>
             <input id="count-slider" type="range" min="2" max="1000" step="1" value="200" />
           </div>
-          <button id="btn-reset" class="btn">Reset</button>
+          <div class="control">
+            <label for="speed-slider">Speed <span id="speed-label">1.0&times;</span></label>
+            <input id="speed-slider" type="range" min="0.1" max="3" step="0.1" value="1" />
+          </div>
+          <div class="control" id="grav-row" style="display: none">
+            <label for="grav-slider">Gravity G <span id="grav-label">1.0</span></label>
+            <input id="grav-slider" type="range" min="0" max="3" step="0.1" value="1" />
+          </div>
+          <div class="btn-row">
+            <button id="btn-pause" class="btn">Pause</button>
+            <button id="btn-reset" class="btn">Reset</button>
+          </div>
         </div>
       </div>
 
-      <div class="hint">Drag a ball to grab &amp; throw &middot; left-drag empty space to orbit &middot; scroll to zoom</div>
+      <div class="hint">Drag a body to grab &amp; throw &middot; left-drag empty space to orbit &middot; scroll to zoom</div>
     </div>
 
     <script type="module" src="/src/main.js"></script>

@@ -1,16 +1,54 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { initWasm, World, makePositions } from './wasm.js';
+import { initWasm, World, makePositions, makeExtra } from './wasm.js';
 
 await initWasm();
 
-// --- simulation -----------------------------------------------------------
-let bodyCount = 200;
-let world = new World(0, bodyCount);
-let positions = makePositions(world);
-const radius = world.radius(); // constant across rebuilds
-const bounds = world.bounds(); // constant across rebuilds
-let count = world.count();
+// --- sim registry ---------------------------------------------------------
+// Each entry describes how a Rust sim (by `kind`) is presented: body-count
+// range, environment (box/grid), camera framing, and rendering (per-instance
+// scale, speed coloring). The SceneManager (loadSim/buildWorld below) reads
+// these to (re)configure the scene without per-sim branching elsewhere.
+const SIMS = {
+  collisions: {
+    kind: 0,
+    defaultCount: 200,
+    minCount: 2,
+    maxCount: 1000,
+    boxed: true, // walls + floor box, camera framed on the box
+    showGrid: true,
+    colorBySpeed: false,
+    speedScale: 6,
+    centralScale: 1,
+    hasGravityParam: false,
+    camPos: new THREE.Vector3(11, 9, 15),
+  },
+  gravity: {
+    kind: 1,
+    defaultCount: 500,
+    minCount: 50,
+    maxCount: 1500,
+    boxed: false, // open space centered on the origin
+    showGrid: false,
+    colorBySpeed: true,
+    speedScale: 16,
+    centralScale: 6, // draw the heavy central body (index 0) larger
+    hasGravityParam: true,
+    camPos: new THREE.Vector3(0, 15, 22),
+  },
+};
+
+let simKey = 'collisions';
+let cfg = SIMS[simKey];
+
+// --- simulation state (rebuilt on sim / count change) ---------------------
+let world = null;
+let positions = null;
+let extra = null;
+let simRadius = 0.4;
+let simBounds = 4;
+let count = 0;
+let bodyCount = cfg.defaultCount;
 
 // --- renderer / scene -----------------------------------------------------
 const canvas = document.getElementById('scene');
@@ -26,12 +64,11 @@ const camera = new THREE.PerspectiveCamera(
   0.1,
   1000,
 );
-camera.position.set(11, 9, 15);
+camera.position.copy(cfg.camPos);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.target.set(0, bounds * 0.5, 0);
 
 // --- lights ---------------------------------------------------------------
 scene.add(new THREE.HemisphereLight(0xffffff, 0x202028, 0.7));
@@ -39,20 +76,21 @@ const key = new THREE.DirectionalLight(0xffffff, 1.3);
 key.position.set(8, 16, 6);
 scene.add(key);
 
-// --- environment: ground grid + box ---------------------------------------
-const grid = new THREE.GridHelper(bounds * 2, 20, 0x444444, 0x222222);
+// --- environment: ground grid + box (sized to the boxed sim) --------------
+const ENV_BOUNDS = 4; // collisions bounds; box/grid only show for that sim
+const grid = new THREE.GridHelper(ENV_BOUNDS * 2, 20, 0x444444, 0x222222);
 scene.add(grid);
 
-const boxGeo = new THREE.BoxGeometry(bounds * 2, bounds * 2, bounds * 2);
+const boxGeo = new THREE.BoxGeometry(ENV_BOUNDS * 2, ENV_BOUNDS * 2, ENV_BOUNDS * 2);
 const box = new THREE.LineSegments(
   new THREE.EdgesGeometry(boxGeo),
   new THREE.LineBasicMaterial({ color: 0x333333 }),
 );
-box.position.y = bounds; // rests on the grid (floor at y = 0)
+box.position.y = ENV_BOUNDS; // rests on the grid (floor at y = 0)
 scene.add(box);
 
-// --- instanced spheres ----------------------------------------------------
-const sphereGeo = new THREE.SphereGeometry(radius, 18, 14);
+// --- instanced spheres (unit sphere, scaled per instance) -----------------
+const sphereGeo = new THREE.SphereGeometry(1, 16, 12);
 const sphereMat = new THREE.MeshStandardMaterial({
   color: 0xffffff, // actual tint comes from per-instance colors
   roughness: 0.4,
@@ -60,12 +98,12 @@ const sphereMat = new THREE.MeshStandardMaterial({
 });
 const BASE_COLOR = new THREE.Color(0xe8e8e8);
 const HELD_COLOR = new THREE.Color(0x6ca0ff);
+const tmpColor = new THREE.Color();
 const dummy = new THREE.Object3D();
 let mesh = null;
 
-// (Re)create the InstancedMesh for the current body count and tint every
-// instance with the base color (instanceColor must be fully initialized or
-// untouched instances render black).
+// (Re)create the InstancedMesh for the current body count. instanceColor must
+// be fully initialized or untouched instances render black.
 function buildMesh() {
   if (mesh) {
     scene.remove(mesh);
@@ -77,18 +115,44 @@ function buildMesh() {
   mesh.instanceColor.needsUpdate = true;
   scene.add(mesh);
 }
-buildMesh();
 
-// Tear down the sim and rebuild it with a new body count (slider).
-function rebuild(n) {
-  releaseGrab(); // drop anything held before the indices change
+// Rebuild the active sim with a new body count (slider / sim switch).
+function buildWorld(n) {
+  releaseGrab(); // indices change; drop anything held
+  if (world && typeof world.free === 'function') world.free();
   bodyCount = n;
-  if (typeof world.free === 'function') world.free(); // free old WASM instance
-  world = new World(0, bodyCount);
+  world = new World(cfg.kind, n);
   positions = makePositions(world);
+  extra = makeExtra(world);
+  simRadius = world.radius();
+  simBounds = world.bounds();
   count = world.count();
   buildMesh();
   statCount.textContent = count;
+}
+
+// Switch to a different sim: reconfigure environment, controls, UI, then build.
+function loadSim(nextKey) {
+  if (!SIMS[nextKey]) return;
+  simKey = nextKey;
+  cfg = SIMS[nextKey];
+
+  grid.visible = cfg.showGrid;
+  box.visible = cfg.boxed;
+
+  countSlider.min = String(cfg.minCount);
+  countSlider.max = String(cfg.maxCount);
+  countSlider.value = String(cfg.defaultCount);
+  countLabel.textContent = String(cfg.defaultCount);
+  gravRow.style.display = cfg.hasGravityParam ? '' : 'none';
+
+  buildWorld(cfg.defaultCount);
+
+  camera.position.copy(cfg.camPos);
+  controls.target.set(0, cfg.boxed ? simBounds * 0.5 : 0, 0);
+  controls.update();
+
+  for (const b of segBtns) b.classList.toggle('is-active', b.dataset.sim === nextKey);
 }
 
 // --- ui -------------------------------------------------------------------
@@ -96,20 +160,46 @@ const statCount = document.getElementById('stat-count');
 const statFps = document.getElementById('stat-fps');
 const countSlider = document.getElementById('count-slider');
 const countLabel = document.getElementById('count-label');
-statCount.textContent = count;
-countSlider.value = String(bodyCount);
-countLabel.textContent = String(bodyCount);
+const speedSlider = document.getElementById('speed-slider');
+const speedLabel = document.getElementById('speed-label');
+const gravSlider = document.getElementById('grav-slider');
+const gravLabel = document.getElementById('grav-label');
+const gravRow = document.getElementById('grav-row');
+const btnPause = document.getElementById('btn-pause');
+const segBtns = Array.from(document.querySelectorAll('.seg__btn'));
 
-document.getElementById('btn-reset').addEventListener('click', () => world.reset());
+let speed = 1; // sim-time multiplier
+let paused = false;
 
-// Live label while dragging; rebuild only on release so we don't thrash the
-// sim/mesh on every intermediate value.
+for (const b of segBtns) {
+  b.addEventListener('click', () => loadSim(b.dataset.sim));
+}
+
+// Live label while dragging; rebuild only on release so we don't thrash.
 countSlider.addEventListener('input', () => {
   countLabel.textContent = countSlider.value;
 });
 countSlider.addEventListener('change', () => {
-  rebuild(parseInt(countSlider.value, 10));
+  buildWorld(parseInt(countSlider.value, 10));
 });
+
+speedSlider.addEventListener('input', () => {
+  speed = parseFloat(speedSlider.value);
+  speedLabel.textContent = `${speed.toFixed(1)}×`;
+});
+
+gravSlider.addEventListener('input', () => {
+  const g = parseFloat(gravSlider.value);
+  gravLabel.textContent = g.toFixed(1);
+  world.set_param(0, g); // id 0 = gravitational constant
+});
+
+btnPause.addEventListener('click', () => {
+  paused = !paused;
+  btnPause.textContent = paused ? 'Play' : 'Pause';
+});
+
+document.getElementById('btn-reset').addEventListener('click', () => world.reset());
 
 // --- grab & throw ---------------------------------------------------------
 const raycaster = new THREE.Raycaster();
@@ -122,7 +212,9 @@ const lastDragPos = new THREE.Vector3();
 const throwVel = new THREE.Vector3();
 let grabbed = -1; // instance id being dragged, -1 = none
 let lastDragTime = 0;
-const MAX_THROW = 40; // cap fling speed (world units / s)
+const MAX_THROW = 40;
+
+const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 
 function pointerNDC(e) {
   const rect = canvas.getBoundingClientRect();
@@ -131,10 +223,44 @@ function pointerNDC(e) {
 }
 
 function clampToBox(v) {
-  const lim = bounds - radius;
-  v.x = Math.max(-lim, Math.min(lim, v.x));
-  v.z = Math.max(-lim, Math.min(lim, v.z));
-  v.y = Math.max(radius, Math.min(2 * bounds - radius, v.y));
+  if (cfg.boxed) {
+    const lim = simBounds - simRadius;
+    v.x = clamp(v.x, -lim, lim);
+    v.z = clamp(v.z, -lim, lim);
+    v.y = clamp(v.y, simRadius, 2 * simBounds - simRadius);
+  } else {
+    const lim = simBounds;
+    v.x = clamp(v.x, -lim, lim);
+    v.y = clamp(v.y, -lim, lim);
+    v.z = clamp(v.z, -lim, lim);
+  }
+}
+
+// Nearest body to the click ray within a generous radius. More forgiving than
+// exact mesh raycasting and works for the tiny N-body stars too.
+function pickBody() {
+  raycaster.setFromCamera(ndc, camera);
+  const o = raycaster.ray.origin;
+  const d = raycaster.ray.direction; // normalized
+  const p = positions();
+  const pickR = Math.max(simRadius * 1.6, 0.35);
+  const pickR2 = pickR * pickR;
+  let best = -1;
+  let bestT = Infinity;
+  for (let i = 0; i < count; i++) {
+    const k = i * 3;
+    const wx = p[k] - o.x;
+    const wy = p[k + 1] - o.y;
+    const wz = p[k + 2] - o.z;
+    const t = wx * d.x + wy * d.y + wz * d.z; // distance along ray to closest point
+    if (t < 0 || t >= bestT) continue; // behind camera, or farther than current best
+    const perp2 = wx * wx + wy * wy + wz * wz - t * t;
+    if (perp2 <= pickR2) {
+      bestT = t;
+      best = i;
+    }
+  }
+  return best;
 }
 
 function releaseGrab() {
@@ -146,17 +272,15 @@ function releaseGrab() {
   controls.enabled = true;
 }
 
-// Capture-phase on window so we run BEFORE OrbitControls' canvas listener; when
-// we grab a ball we stopPropagation so the orbit gesture never starts.
+// Capture phase on window so this runs BEFORE OrbitControls' canvas listener;
+// when we grab a body we stopPropagation so the orbit gesture never starts.
 function onPointerDown(e) {
-  if (e.button !== 0 || e.target !== canvas) return; // left button, on canvas
+  if (e.button !== 0 || e.target !== canvas) return;
   pointerNDC(e);
-  raycaster.setFromCamera(ndc, camera);
-  mesh.computeBoundingSphere(); // matrices are current from the last render()
-  const hits = raycaster.intersectObject(mesh);
-  if (hits.length === 0 || hits[0].instanceId == null) return; // missed -> orbit
+  const id = pickBody();
+  if (id < 0) return; // missed -> let OrbitControls orbit
 
-  grabbed = hits[0].instanceId;
+  grabbed = id;
   controls.enabled = false;
   e.stopPropagation();
 
@@ -164,8 +288,6 @@ function onPointerDown(e) {
   mesh.setColorAt(grabbed, HELD_COLOR);
   mesh.instanceColor.needsUpdate = true;
 
-  // Drag plane faces the camera, through the ball's current position, so the
-  // ball tracks the cursor at a constant depth while dragging.
   const p = positions();
   const k = grabbed * 3;
   lastDragPos.set(p[k], p[k + 1], p[k + 2]);
@@ -185,7 +307,7 @@ function onPointerMove(e) {
   const now = performance.now();
   const dt = Math.max((now - lastDragTime) / 1000, 1e-3);
   instVel.copy(hitPoint).sub(lastDragPos).divideScalar(dt);
-  throwVel.lerp(instVel, 0.6); // smooth out cursor jitter
+  throwVel.lerp(instVel, 0.6); // smooth cursor jitter
   lastDragTime = now;
   lastDragPos.copy(hitPoint);
 
@@ -194,14 +316,12 @@ function onPointerMove(e) {
 
 function onPointerUp() {
   if (grabbed < 0) return;
-  // Releasing after a pause should drop, not fling: ignore stale velocity.
-  if (performance.now() - lastDragTime > 120) throwVel.set(0, 0, 0);
+  if (performance.now() - lastDragTime > 120) throwVel.set(0, 0, 0); // paused -> drop
   if (throwVel.length() > MAX_THROW) throwVel.setLength(MAX_THROW);
   world.set_vel(grabbed, throwVel.x, throwVel.y, throwVel.z);
   releaseGrab();
 }
 
-// Capture phase so this runs before OrbitControls' canvas listener.
 window.addEventListener('pointerdown', onPointerDown, true);
 window.addEventListener('pointermove', onPointerMove);
 window.addEventListener('pointerup', onPointerUp);
@@ -212,6 +332,12 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// Map a normalized speed [0,1] to a blue(slow) -> orange(fast) color.
+function speedToColor(t, out) {
+  t = clamp(t, 0, 1);
+  return out.setHSL(0.62 - 0.54 * t, 0.72, 0.38 + 0.34 * t);
+}
+
 // --- render + fixed-timestep loop -----------------------------------------
 const FIXED = 1 / 120;
 let last = performance.now();
@@ -221,12 +347,22 @@ let fpsFrames = 0;
 
 function render() {
   const p = positions(); // re-fetched AFTER stepping (step may reallocate)
+  const ex = cfg.colorBySpeed ? extra() : null;
+  const cs = cfg.centralScale;
   for (let i = 0; i < count; i++) {
-    dummy.position.set(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]);
+    const k = i * 3;
+    dummy.position.set(p[k], p[k + 1], p[k + 2]);
+    dummy.scale.setScalar(simRadius * (cs > 1 && i === 0 ? cs : 1));
     dummy.updateMatrix();
     mesh.setMatrixAt(i, dummy.matrix);
+    if (ex) {
+      if (i === grabbed) tmpColor.copy(HELD_COLOR);
+      else speedToColor(ex[i] / cfg.speedScale, tmpColor);
+      mesh.setColorAt(i, tmpColor);
+    }
   }
   mesh.instanceMatrix.needsUpdate = true;
+  if (ex) mesh.instanceColor.needsUpdate = true;
   controls.update();
   renderer.render(scene, camera);
 }
@@ -235,10 +371,14 @@ function frame(now) {
   let dt = (now - last) / 1000;
   last = now;
   if (dt > 0.1) dt = 0.1; // clamp after tab-switch / stalls
-  acc += dt;
-  while (acc >= FIXED) {
-    world.step(FIXED);
-    acc -= FIXED;
+  if (paused) {
+    acc = 0;
+  } else {
+    acc += dt * speed;
+    while (acc >= FIXED) {
+      world.step(FIXED);
+      acc -= FIXED;
+    }
   }
   render();
 
@@ -264,7 +404,8 @@ function schedule() {
   }
 }
 
-render(); // paint the initial frame right away, before the loop ticks
+loadSim('collisions'); // build the initial sim + scene
+render(); // paint the first frame before the loop ticks
 schedule();
 
 document.addEventListener('visibilitychange', () => {
@@ -272,7 +413,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Dev-only: headless previews keep the tab hidden, which pauses rAF. This hook
-// lets the harness manually advance the sim and draw a frame for screenshots.
+// lets the harness manually advance the sim and inspect state for verification.
 if (import.meta.env.DEV) {
   window.__sandbox = {
     tick(steps = 60) {
@@ -280,6 +421,17 @@ if (import.meta.env.DEV) {
       render();
     },
     render,
+    loadSim,
+    buildWorld,
+    setSpeed(v) {
+      speed = v;
+    },
+    setG(v) {
+      world.set_param(0, v);
+    },
+    setPaused(v) {
+      paused = v;
+    },
     grab(i, x, y, z) {
       world.set_held(i);
       world.set_pos(i, x, y, z);
@@ -288,29 +440,53 @@ if (import.meta.env.DEV) {
       world.set_vel(i, vx, vy, vz);
       world.set_held(-1);
     },
-    rebuild,
     sample() {
       const p = positions();
       let minY = Infinity;
       let maxY = -Infinity;
       let maxAbsXZ = 0;
+      let maxAbs = 0;
       let minPairDist = Infinity;
+      let nan = false;
       for (let i = 0; i < count; i++) {
+        const x = p[i * 3];
         const y = p[i * 3 + 1];
+        const z = p[i * 3 + 2];
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) nan = true;
         if (y < minY) minY = y;
         if (y > maxY) maxY = y;
-        maxAbsXZ = Math.max(maxAbsXZ, Math.abs(p[i * 3]), Math.abs(p[i * 3 + 2]));
+        maxAbsXZ = Math.max(maxAbsXZ, Math.abs(x), Math.abs(z));
+        maxAbs = Math.max(maxAbs, Math.abs(x), Math.abs(y), Math.abs(z));
       }
-      for (let i = 0; i < count; i++) {
-        for (let j = i + 1; j < count; j++) {
-          const dx = p[i * 3] - p[j * 3];
-          const dy = p[i * 3 + 1] - p[j * 3 + 1];
-          const dz = p[i * 3 + 2] - p[j * 3 + 2];
-          const d = Math.hypot(dx, dy, dz);
-          if (d < minPairDist) minPairDist = d;
+      if (count <= 400) {
+        for (let i = 0; i < count; i++) {
+          for (let j = i + 1; j < count; j++) {
+            const dx = p[i * 3] - p[j * 3];
+            const dy = p[i * 3 + 1] - p[j * 3 + 1];
+            const dz = p[i * 3 + 2] - p[j * 3 + 2];
+            const d = Math.hypot(dx, dy, dz);
+            if (d < minPairDist) minPairDist = d;
+          }
         }
       }
-      return { count, radius, bounds, minY, maxY, maxAbsXZ, minPairDist, first: [p[0], p[1], p[2]] };
+      const ex = extra();
+      let maxSpeed = 0;
+      for (let i = 0; i < ex.length; i++) if (ex[i] > maxSpeed) maxSpeed = ex[i];
+      return {
+        sim: simKey,
+        count,
+        radius: simRadius,
+        bounds: simBounds,
+        minY,
+        maxY,
+        maxAbsXZ,
+        maxAbs,
+        minPairDist,
+        nan,
+        maxSpeed,
+        extraLen: ex.length,
+        first: [p[0], p[1], p[2]],
+      };
     },
   };
 }
