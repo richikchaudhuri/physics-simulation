@@ -537,6 +537,171 @@ impl Simulation for NBody {
     }
 }
 
+/// Sim #2: double pendulums (chaos). Each pendulum is two point masses on rigid
+/// massless rods swinging in a plane. The motion follows the standard Lagrangian
+/// equations of motion, integrated with RK4 (4th order, low energy drift). Many
+/// pendulums launch from nearly-identical angles; their exponential divergence
+/// (sensitive dependence on initial conditions) shows as the colored arms fan out.
+struct DoublePendulum {
+    th1: Vec<f32>, // upper-arm angle from the downward vertical
+    th2: Vec<f32>, // lower-arm angle from the downward vertical
+    w1: Vec<f32>,  // angular velocities
+    w2: Vec<f32>,
+    pos: Vec<f32>, // [bob1, bob2] world coords per pendulum, len 2*p*3
+    p: usize,      // number of pendulums
+    m1: f32,
+    m2: f32,
+    l1: f32,
+    l2: f32,
+    g: f32,
+}
+
+impl DoublePendulum {
+    fn new(p: usize) -> Self {
+        let p = p.max(1);
+        let mut th1 = vec![0.0f32; p];
+        let mut th2 = vec![0.0f32; p];
+        let w1 = vec![0.0f32; p];
+        let w2 = vec![0.0f32; p];
+        // Launch from a near-identical high angle; a tiny per-pendulum offset on
+        // theta2 (~0.11 deg steps) is all chaos needs to fan them out over time.
+        let base = 2.3f32; // ~132 deg from straight down -> energetic, flips over
+        for i in 0..p {
+            th1[i] = base;
+            th2[i] = base + i as f32 * 0.002;
+        }
+        let mut s = Self {
+            th1,
+            th2,
+            w1,
+            w2,
+            pos: vec![0.0f32; p * 6],
+            p,
+            m1: 1.0,
+            m2: 1.0,
+            l1: 1.0,
+            l2: 1.0,
+            g: 9.81,
+        };
+        s.sync_pos();
+        s
+    }
+
+    /// Angular accelerations (alpha1, alpha2) for one pendulum's state. Standard
+    /// double-pendulum EoM (angles from the downward vertical).
+    #[inline]
+    fn accel(&self, th1: f32, th2: f32, w1: f32, w2: f32) -> (f32, f32) {
+        let (m1, m2, l1, l2, g) = (self.m1, self.m2, self.l1, self.l2, self.g);
+        let d = th1 - th2;
+        let sd = d.sin();
+        let cd = d.cos();
+        let denom = 2.0 * m1 + m2 - m2 * (2.0 * th1 - 2.0 * th2).cos();
+
+        let num1 = -g * (2.0 * m1 + m2) * th1.sin()
+            - m2 * g * (th1 - 2.0 * th2).sin()
+            - 2.0 * sd * m2 * (w2 * w2 * l2 + w1 * w1 * l1 * cd);
+        let a1 = num1 / (l1 * denom);
+
+        let num2 = 2.0
+            * sd
+            * (w1 * w1 * l1 * (m1 + m2) + g * (m1 + m2) * th1.cos() + w2 * w2 * l2 * m2 * cd);
+        let a2 = num2 / (l2 * denom);
+        (a1, a2)
+    }
+
+    /// One classical RK4 step on a single pendulum's 4D state (th1, th2, w1, w2).
+    #[inline]
+    fn rk4(&self, th1: f32, th2: f32, w1: f32, w2: f32, dt: f32) -> (f32, f32, f32, f32) {
+        // y' = (w1, w2, a1, a2)
+        let (a1, a2) = self.accel(th1, th2, w1, w2);
+        let (k1t1, k1t2, k1w1, k1w2) = (w1, w2, a1, a2);
+
+        let (a1, a2) = self.accel(
+            th1 + 0.5 * dt * k1t1,
+            th2 + 0.5 * dt * k1t2,
+            w1 + 0.5 * dt * k1w1,
+            w2 + 0.5 * dt * k1w2,
+        );
+        let (k2t1, k2t2, k2w1, k2w2) = (w1 + 0.5 * dt * k1w1, w2 + 0.5 * dt * k1w2, a1, a2);
+
+        let (a1, a2) = self.accel(
+            th1 + 0.5 * dt * k2t1,
+            th2 + 0.5 * dt * k2t2,
+            w1 + 0.5 * dt * k2w1,
+            w2 + 0.5 * dt * k2w2,
+        );
+        let (k3t1, k3t2, k3w1, k3w2) = (w1 + 0.5 * dt * k2w1, w2 + 0.5 * dt * k2w2, a1, a2);
+
+        let (a1, a2) = self.accel(
+            th1 + dt * k3t1,
+            th2 + dt * k3t2,
+            w1 + dt * k3w1,
+            w2 + dt * k3w2,
+        );
+        let (k4t1, k4t2, k4w1, k4w2) = (w1 + dt * k3w1, w2 + dt * k3w2, a1, a2);
+
+        let s = dt / 6.0;
+        (
+            th1 + s * (k1t1 + 2.0 * k2t1 + 2.0 * k3t1 + k4t1),
+            th2 + s * (k1t2 + 2.0 * k2t2 + 2.0 * k3t2 + k4t2),
+            w1 + s * (k1w1 + 2.0 * k2w1 + 2.0 * k3w1 + k4w1),
+            w2 + s * (k1w2 + 2.0 * k2w2 + 2.0 * k3w2 + k4w2),
+        )
+    }
+
+    /// Recompute Cartesian bob positions (in the xy-plane, z = 0) from angles.
+    fn sync_pos(&mut self) {
+        for i in 0..self.p {
+            let (s1, c1) = self.th1[i].sin_cos();
+            let (s2, c2) = self.th2[i].sin_cos();
+            let x1 = self.l1 * s1;
+            let y1 = -self.l1 * c1;
+            let x2 = x1 + self.l2 * s2;
+            let y2 = y1 - self.l2 * c2;
+            let k = i * 6;
+            self.pos[k] = x1;
+            self.pos[k + 1] = y1;
+            self.pos[k + 2] = 0.0;
+            self.pos[k + 3] = x2;
+            self.pos[k + 4] = y2;
+            self.pos[k + 5] = 0.0;
+        }
+    }
+}
+
+impl Simulation for DoublePendulum {
+    fn step(&mut self, dt: f32) {
+        for i in 0..self.p {
+            let (t1, t2, v1, v2) = self.rk4(self.th1[i], self.th2[i], self.w1[i], self.w2[i], dt);
+            self.th1[i] = t1;
+            self.th2[i] = t2;
+            self.w1[i] = v1;
+            self.w2[i] = v2;
+        }
+        self.sync_pos();
+    }
+    fn positions(&self) -> &[f32] {
+        &self.pos
+    }
+    fn reset(&mut self) {
+        *self = DoublePendulum::new(self.p);
+    }
+    fn count(&self) -> usize {
+        self.p * 2 // two bobs per pendulum
+    }
+    fn radius(&self) -> f32 {
+        0.09
+    }
+    fn bounds(&self) -> f32 {
+        self.l1 + self.l2
+    }
+    fn set_param(&mut self, id: u32, v: f32) {
+        if id == 0 {
+            self.g = v.max(0.0); // gravitational acceleration
+        }
+    }
+}
+
 /// The single concrete type that crosses the wasm-bindgen boundary. It owns a
 /// trait object so JS only ever talks to `World`, while Rust swaps the sim behind it.
 #[wasm_bindgen]
@@ -550,8 +715,9 @@ impl World {
     pub fn new(kind: u32, n: usize) -> World {
         console_error_panic_hook::set_once();
         let sim: Box<dyn Simulation> = match kind {
-            // Phase 3+ will add: 2 => Pendulum, 3 => Cloth
+            // Phase 4 will add: 3 => Cloth
             1 => Box::new(NBody::new(n)),
+            2 => Box::new(DoublePendulum::new(n)),
             _ => Box::new(Bouncer::new(n)),
         };
         World { sim }

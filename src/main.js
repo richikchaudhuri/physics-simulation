@@ -26,7 +26,10 @@ const SIMS = {
     gravMax: 2, // multiplier on Earth gravity; 0 = weightless gas
     gravStep: 0.1,
     gravDefault: 1,
+    grabbable: true,
+    rods: false,
     camPos: new THREE.Vector3(11, 9, 15),
+    hint: 'Drag a ball to grab & throw · left-drag to orbit · scroll to zoom',
   },
   gravity: {
     kind: 1,
@@ -44,7 +47,33 @@ const SIMS = {
     gravMax: 3,
     gravStep: 0.1,
     gravDefault: 1,
+    grabbable: true,
+    rods: false,
     camPos: new THREE.Vector3(0, 15, 22),
+    hint: 'Drag a star to grab & throw · left-drag to orbit · scroll to zoom',
+  },
+  pendulum: {
+    kind: 2,
+    defaultCount: 24, // number of pendulums (bobs = 2x this)
+    minCount: 1,
+    maxCount: 200,
+    boxed: false,
+    showGrid: false,
+    colorBySpeed: false,
+    colorByIndex: true, // rainbow by pendulum, so chaotic divergence is visible
+    speedScale: 1,
+    centralScale: 1,
+    rods: true, // draw the two arms of each pendulum
+    grabbable: false, // bobs are angle-constrained; left-drag always orbits
+    hasGravityParam: true,
+    gravLabel: 'Gravity g',
+    gravMin: 0,
+    gravMax: 30,
+    gravStep: 0.5,
+    gravDefault: 9.81,
+    camPos: new THREE.Vector3(0, -0.5, 8),
+    camTarget: new THREE.Vector3(0, -1, 0),
+    hint: 'Identical pendulums, tiny angle offsets — watch chaos diverge · left-drag to orbit',
   },
 };
 
@@ -112,6 +141,73 @@ const tmpColor = new THREE.Color();
 const dummy = new THREE.Object3D();
 let mesh = null;
 
+// Rods for the pendulum sim: one THREE.LineSegments holding both arms of every
+// pendulum (pivot->bob1, bob1->bob2). Per-vertex colored to match its bobs;
+// positions are rewritten each frame from the WASM bob coords.
+const rodMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9 });
+let rodGeo = null;
+let rodPos = null; // Float32Array backing rodGeo's position attribute
+let rodLines = null;
+
+// Hue ramp by pendulum index (0..n) -> a spread-out rainbow.
+function indexToColor(p, total, out) {
+  return out.setHSL((p / Math.max(total, 1)) * 0.92, 0.7, 0.56);
+}
+
+// (Re)build the pendulum rod geometry for the current pendulum count. Colors are
+// fixed here (per pendulum); only positions change per frame.
+function buildRods() {
+  if (rodLines) {
+    scene.remove(rodLines);
+    rodGeo.dispose();
+    rodLines = null;
+  }
+  const pend = count / 2; // two bobs per pendulum
+  const nVerts = pend * 4; // 2 segments * 2 endpoints
+  rodPos = new Float32Array(nVerts * 3);
+  const colArr = new Float32Array(nVerts * 3);
+  for (let pi = 0; pi < pend; pi++) {
+    indexToColor(pi, pend, tmpColor);
+    for (let v = 0; v < 4; v++) {
+      const c = (pi * 4 + v) * 3;
+      colArr[c] = tmpColor.r;
+      colArr[c + 1] = tmpColor.g;
+      colArr[c + 2] = tmpColor.b;
+    }
+  }
+  rodGeo = new THREE.BufferGeometry();
+  rodGeo.setAttribute('position', new THREE.BufferAttribute(rodPos, 3));
+  rodGeo.setAttribute('color', new THREE.BufferAttribute(colArr, 3));
+  rodLines = new THREE.LineSegments(rodGeo, rodMat);
+  rodLines.frustumCulled = false; // bobs can swing past the initial bounds
+  scene.add(rodLines);
+}
+
+// Rewrite rod endpoints from the bob positions `p` (shared pivot at the origin).
+function updateRods(p) {
+  const pend = count / 2;
+  for (let pi = 0; pi < pend; pi++) {
+    const b1 = 2 * pi * 3; // bob1
+    const b2 = (2 * pi + 1) * 3; // bob2
+    const o = pi * 12; // 4 verts * 3
+    // segment: pivot -> bob1
+    rodPos[o] = 0;
+    rodPos[o + 1] = 0;
+    rodPos[o + 2] = 0;
+    rodPos[o + 3] = p[b1];
+    rodPos[o + 4] = p[b1 + 1];
+    rodPos[o + 5] = p[b1 + 2];
+    // segment: bob1 -> bob2
+    rodPos[o + 6] = p[b1];
+    rodPos[o + 7] = p[b1 + 1];
+    rodPos[o + 8] = p[b1 + 2];
+    rodPos[o + 9] = p[b2];
+    rodPos[o + 10] = p[b2 + 1];
+    rodPos[o + 11] = p[b2 + 2];
+  }
+  rodGeo.attributes.position.needsUpdate = true;
+}
+
 // (Re)create the InstancedMesh for the current body count. instanceColor must
 // be fully initialized or untouched instances render black.
 function buildMesh() {
@@ -124,6 +220,9 @@ function buildMesh() {
   for (let i = 0; i < count; i++) mesh.setColorAt(i, BASE_COLOR);
   mesh.instanceColor.needsUpdate = true;
   scene.add(mesh);
+
+  if (cfg.rods) buildRods();
+  else if (rodLines) rodLines.visible = false;
 }
 
 // Rebuild the active sim with a new body count (slider / sim switch).
@@ -170,9 +269,11 @@ function loadSim(nextKey) {
   buildWorld(cfg.defaultCount);
 
   camera.position.copy(cfg.camPos);
-  controls.target.set(0, cfg.boxed ? simBounds * 0.5 : 0, 0);
+  if (cfg.camTarget) controls.target.copy(cfg.camTarget);
+  else controls.target.set(0, cfg.boxed ? simBounds * 0.5 : 0, 0);
   controls.update();
 
+  if (cfg.hint) hintEl.textContent = cfg.hint;
   for (const b of segBtns) b.classList.toggle('is-active', b.dataset.sim === nextKey);
 }
 
@@ -189,6 +290,7 @@ const gravName = document.getElementById('grav-name');
 const gravRow = document.getElementById('grav-row');
 const btnPause = document.getElementById('btn-pause');
 const segBtns = Array.from(document.querySelectorAll('.seg__btn'));
+const hintEl = document.querySelector('.hint');
 
 let speed = 1; // sim-time multiplier
 let paused = false;
@@ -300,6 +402,7 @@ function releaseGrab() {
 // when we grab a body we stopPropagation so the orbit gesture never starts.
 function onPointerDown(e) {
   if (e.button !== 0 || e.target !== canvas) return;
+  if (!cfg.grabbable) return; // e.g. pendulum: let OrbitControls orbit instead
   pointerNDC(e);
   const id = pickBody();
   if (id < 0) return; // missed -> let OrbitControls orbit
@@ -372,21 +475,26 @@ let fpsFrames = 0;
 function render() {
   const p = positions(); // re-fetched AFTER stepping (step may reallocate)
   const ex = cfg.colorBySpeed ? extra() : null;
+  const byIndex = cfg.colorByIndex;
+  const recolor = ex || byIndex;
   const cs = cfg.centralScale;
+  const pend = count / 2; // only used for pendulum index coloring
   for (let i = 0; i < count; i++) {
     const k = i * 3;
     dummy.position.set(p[k], p[k + 1], p[k + 2]);
     dummy.scale.setScalar(simRadius * (cs > 1 && i === 0 ? cs : 1));
     dummy.updateMatrix();
     mesh.setMatrixAt(i, dummy.matrix);
-    if (ex) {
+    if (recolor) {
       if (i === grabbed) tmpColor.copy(HELD_COLOR);
-      else speedToColor(ex[i] / cfg.speedScale, tmpColor);
+      else if (ex) speedToColor(ex[i] / cfg.speedScale, tmpColor);
+      else indexToColor((i / 2) | 0, pend, tmpColor); // two bobs share a pendulum hue
       mesh.setColorAt(i, tmpColor);
     }
   }
   mesh.instanceMatrix.needsUpdate = true;
-  if (ex) mesh.instanceColor.needsUpdate = true;
+  if (recolor) mesh.instanceColor.needsUpdate = true;
+  if (cfg.rods && rodLines) updateRods(p);
   controls.update();
   renderer.render(scene, camera);
 }
@@ -456,6 +564,11 @@ if (import.meta.env.DEV) {
     setPaused(v) {
       paused = v;
     },
+    rods() {
+      return rodLines
+        ? { visible: rodLines.visible, verts: rodGeo.attributes.position.count }
+        : null;
+    },
     grab(i, x, y, z) {
       world.set_held(i);
       world.set_pos(i, x, y, z);
@@ -496,6 +609,25 @@ if (import.meta.env.DEV) {
       const ex = extra();
       let maxSpeed = 0;
       for (let i = 0; i < ex.length; i++) if (ex[i] > maxSpeed) maxSpeed = ex[i];
+      // Spatial spread (stddev of x,y) — for the pendulum this grows from ~0 to
+      // large as nearly-identical initial states diverge (a chaos signature).
+      let mx = 0;
+      let my = 0;
+      for (let i = 0; i < count; i++) {
+        mx += p[i * 3];
+        my += p[i * 3 + 1];
+      }
+      mx /= count || 1;
+      my /= count || 1;
+      let vx = 0;
+      let vy = 0;
+      for (let i = 0; i < count; i++) {
+        const ddx = p[i * 3] - mx;
+        const ddy = p[i * 3 + 1] - my;
+        vx += ddx * ddx;
+        vy += ddy * ddy;
+      }
+      const spreadXY = Math.sqrt((vx + vy) / (count || 1));
       return {
         sim: simKey,
         count,
@@ -508,6 +640,7 @@ if (import.meta.env.DEV) {
         minPairDist,
         nan,
         maxSpeed,
+        spreadXY,
         extraLen: ex.length,
         first: [p[0], p[1], p[2]],
       };
