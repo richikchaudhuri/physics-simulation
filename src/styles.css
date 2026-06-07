@@ -242,53 +242,196 @@ body {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
-.topbar__right {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+/* About / Settings disclosure: an icon pill that expands the active label and
+   flows a content sheet down beneath it. */
+.disclosure {
+  position: relative;
+  pointer-events: auto;
 }
 
-/* About / Settings — pill chips with a leading icon. */
-.chip {
-  pointer-events: auto;
+.navpill {
+  position: relative;
   display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  padding: 10px 18px;
+  align-items: stretch;
+  gap: 4px;
+  padding: 5px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--panel-bg);
   backdrop-filter: blur(16px) saturate(118%);
   -webkit-backdrop-filter: blur(16px) saturate(118%);
-  color: var(--ink);
-  font: inherit;
-  font-size: 15px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  cursor: pointer;
   box-shadow: 0 12px 30px -16px rgba(0, 0, 0, 0.7);
+}
+
+/* Highlighter that slides between About and Settings (geometry set in JS). */
+.navpill__hl {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 0;
   transition:
-    background 0.18s var(--ease),
-    color 0.18s var(--ease);
+    transform 0.34s var(--ease),
+    width 0.34s var(--ease),
+    opacity 0.24s var(--ease);
 }
 
-.chip:hover {
-  background: var(--faint-3);
+.navpill.has-open .navpill__hl {
+  opacity: 1;
 }
 
-.chip .ico {
+.navpill__btn {
+  position: relative;
+  z-index: 1;
   display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border: none;
   color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+  padding: 9px;
+  border-radius: 999px;
   transition: color 0.18s var(--ease);
 }
 
-.chip .ico svg {
-  width: 22px;
-  height: 22px;
+.navpill__btn .ico {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
 }
 
-.chip:hover .ico {
+.navpill__btn .lbl {
+  display: inline-block;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  padding-left: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  transition:
+    max-width 0.34s var(--ease),
+    opacity 0.28s var(--ease);
+}
+
+.navpill__btn:hover {
+  color: var(--ink);
+}
+
+.navpill__btn.is-open {
   color: var(--accent);
+}
+
+.navpill__btn.is-open .lbl {
+  max-width: 140px;
+  opacity: 1;
+}
+
+/* Flow-down content sheet. .sheet is an animated clip; .sheet__inner is the card. */
+.sheet {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 360px;
+  max-width: calc(100vw - 52px);
+  z-index: 5;
+  pointer-events: none;
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-10px);
+  transition:
+    max-height 0.42s var(--ease),
+    opacity 0.3s var(--ease),
+    transform 0.34s var(--ease);
+}
+
+.sheet[hidden] {
+  display: none;
+}
+
+.sheet.is-open {
+  pointer-events: auto;
+  max-height: 620px;
+  opacity: 1;
+  transform: none;
+}
+
+.sheet__inner {
+  padding: 26px 26px 24px;
+  border-radius: 18px;
+  background: rgba(13, 14, 19, 0.92);
+  backdrop-filter: blur(22px) saturate(120%);
+  -webkit-backdrop-filter: blur(22px) saturate(120%);
+  border: 1px solid var(--line);
+  box-shadow: 0 30px 70px -28px rgba(0, 0, 0, 0.82);
+}
+
+.sheet__title {
+  font-family: var(--font-brand);
+  font-weight: 400;
+  font-size: 29px;
+  letter-spacing: 0.03em;
+  color: var(--ink);
+  margin-bottom: 14px;
+}
+
+.sheet__lead {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink);
+  margin-bottom: 12px;
+}
+
+.sheet__text {
+  font-size: 12.5px;
+  line-height: 1.62;
+  color: var(--muted);
+  margin-bottom: 20px;
+}
+
+.sheet__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 22px;
+}
+
+.sheet__tags span {
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 5px 11px;
+  border: 1px solid var(--faint);
+  border-radius: 999px;
+}
+
+.sheet__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background 0.18s var(--ease);
+}
+
+.sheet__link:hover {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
 }
 
 /* Frosted control surface with a soft white frame and rounded corners. */
@@ -329,39 +472,84 @@ body {
   letter-spacing: 0.26em;
 }
 
-/* --- sim switcher: understated tabs, no boxes ----------------------------- */
+/* --- sim switcher: icon pill, active mode expands to its name -------------- */
+/* Each mode is icon-only at rest; the active one reveals its label. A single
+   highlighter (.seg__hl) is positioned by JS and slides + resizes between modes. */
 .seg {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  position: relative;
+  display: flex;
+  align-items: stretch;
   gap: 4px;
   margin-bottom: 24px;
 }
 
+/* The sliding/resizing highlight behind the active mode (geometry set in JS). */
+.seg__hl {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 100%;
+  border-radius: 12px;
+  background: var(--faint-3);
+  box-shadow: inset 0 -2px 0 var(--accent);
+  pointer-events: none;
+  z-index: 0;
+  transition:
+    transform 0.36s var(--ease),
+    width 0.36s var(--ease);
+}
+
 .seg__btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
   background: transparent;
   border: none;
   color: var(--muted);
   font: inherit;
-  font-size: 16px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  padding: 13px 8px;
   cursor: pointer;
-  border-radius: 11px;
+  padding: 11px;
+  border-radius: 12px;
+  transition: color 0.2s var(--ease);
+}
+
+.seg__btn .ico {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+/* Label is clipped to zero width at rest; expands smoothly when active. The
+   left padding (icon↔label gap) lives inside the clip so it adds no phantom
+   width while collapsed. */
+.seg__btn .lbl {
+  display: inline-block;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  padding-left: 9px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   transition:
-    background 0.2s var(--ease),
-    color 0.2s var(--ease);
+    max-width 0.36s var(--ease),
+    opacity 0.3s var(--ease);
 }
 
 .seg__btn:hover {
   color: var(--ink);
-  background: var(--faint-2);
 }
 
 .seg__btn.is-active {
-  background: var(--faint-3);
   color: var(--ink);
-  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.seg__btn.is-active .lbl {
+  max-width: 160px;
+  opacity: 1;
 }
 
 /* --- stats: quiet editorial read-outs ------------------------------------- */
@@ -417,6 +605,38 @@ body {
   letter-spacing: 0;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
+}
+
+/* Collapsible rows — per-sim controls fold away with an animated height so the
+   auto-height panel resizes smoothly when switching modes (no display:none jump).
+   max-height is a snug ceiling above the tallest single row/button. */
+.collapsible {
+  overflow: hidden;
+  max-height: 80px;
+  transition:
+    max-height 0.36s var(--ease),
+    opacity 0.3s var(--ease),
+    margin-top 0.36s var(--ease),
+    padding-top 0.36s var(--ease),
+    padding-bottom 0.36s var(--ease);
+}
+
+.collapsible.is-collapsed {
+  max-height: 0;
+  margin-top: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Pin lives in its own block (not the actions grid) so it collapses cleanly. */
+.pin-wrap {
+  margin-top: 10px;
+}
+
+.pin-wrap .btn {
+  width: 100%;
 }
 
 /* Thin track with an accent fill (--fill set per-input by JS); refined thumb
@@ -630,147 +850,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   animation: rise 0.6s 0.1s var(--ease) both;
 }
 
-/* --- modals (About / Settings) ------------------------------------------- */
-.modal {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-}
-
-.modal[hidden] {
-  display: none;
-}
-
-.modal__scrim {
-  position: absolute;
-  inset: 0;
-  background: rgba(4, 4, 6, 0.6);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  opacity: 0;
-  transition: opacity 0.22s var(--ease);
-}
-
-.modal.is-open .modal__scrim {
-  opacity: 1;
-}
-
-.modal__card {
-  position: relative;
-  width: 100%;
-  max-width: 430px;
-  padding: 32px 32px 28px;
-  border: 1px solid var(--line);
-  border-radius: 22px;
-  background: rgba(13, 14, 19, 0.94);
-  backdrop-filter: blur(22px) saturate(120%);
-  -webkit-backdrop-filter: blur(22px) saturate(120%);
-  box-shadow: 0 44px 90px -30px rgba(0, 0, 0, 0.82);
-  opacity: 0;
-  transform: translateY(14px) scale(0.98);
-  transition:
-    opacity 0.24s var(--ease),
-    transform 0.24s var(--ease);
-}
-
-.modal.is-open .modal__card {
-  opacity: 1;
-  transform: none;
-}
-
-.modal__close {
-  position: absolute;
-  top: 16px;
-  right: 16px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: 50%;
-  background: var(--faint-2);
-  color: var(--muted);
-  cursor: pointer;
-  transition:
-    background 0.18s var(--ease),
-    color 0.18s var(--ease);
-}
-
-.modal__close svg {
-  width: 24px;
-  height: 24px;
-}
-
-.modal__close:hover {
-  background: var(--faint-3);
-  color: var(--ink);
-}
-
-.modal__title {
-  font-family: var(--font-brand);
-  font-weight: 400;
-  font-size: 31px;
-  letter-spacing: 0.03em;
-  color: var(--ink);
-  margin-bottom: 16px;
-}
-
-.modal__lead {
-  font-size: 14px;
-  line-height: 1.55;
-  color: var(--ink);
-  margin-bottom: 12px;
-}
-
-.modal__text {
-  font-size: 12.5px;
-  line-height: 1.62;
-  color: var(--muted);
-  margin-bottom: 20px;
-}
-
-.modal__tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin-bottom: 24px;
-}
-
-.modal__tags span {
-  font-size: 10.5px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-  padding: 5px 11px;
-  border: 1px solid var(--faint);
-  border-radius: 999px;
-}
-
-.modal__link {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  padding: 11px 18px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
-  color: var(--ink);
-  font-size: 12.5px;
-  font-weight: 500;
-  text-decoration: none;
-  transition: background 0.18s var(--ease);
-}
-
-.modal__link:hover {
-  background: color-mix(in srgb, var(--accent) 26%, transparent);
-}
-
-/* Settings rows + animated toggle switch. */
+/* Settings rows + animated toggle switch (inside the Settings sheet). */
 .setting {
   display: flex;
   align-items: center;
@@ -902,17 +982,10 @@ body.reduce-motion *::after {
     gap: 12px;
   }
 
-  /* Icon-only chips to keep the top row compact on phones. */
-  .chip .lbl {
-    display: none;
-  }
-
-  .chip {
-    padding: 9px;
-  }
-
-  .topbar__right {
-    gap: 6px;
+  /* Flow-down sheet fills the safe width and aligns under the nav pill. */
+  .sheet {
+    width: calc(100vw - 28px);
+    max-width: 400px;
   }
 
   .panel {

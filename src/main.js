@@ -359,7 +359,7 @@ function loadSim(nextKey) {
 
   // The gravity control is shared; each sim relabels/rescales it (and a fresh
   // World starts at the matching default, so no set_param push is needed here).
-  gravRow.style.display = cfg.hasGravityParam ? '' : 'none';
+  gravRow.classList.toggle('is-collapsed', !cfg.hasGravityParam);
   if (cfg.hasGravityParam) {
     gravName.textContent = cfg.gravLabel;
     gravSlider.min = String(cfg.gravMin);
@@ -370,7 +370,7 @@ function loadSim(nextKey) {
   }
 
   // Wind control (cloth only): same shared-default trick as gravity.
-  windRow.style.display = cfg.hasWind ? '' : 'none';
+  windRow.classList.toggle('is-collapsed', !cfg.hasWind);
   if (cfg.hasWind) {
     windName.textContent = cfg.windLabel;
     windSlider.min = String(cfg.windMin);
@@ -382,7 +382,7 @@ function loadSim(nextKey) {
 
   // Pin toggle (cloth only): always starts at corners-pinned.
   pinMode = 0;
-  btnPin.style.display = cfg.hasPin ? '' : 'none';
+  pinWrap.classList.toggle('is-collapsed', !cfg.hasPin);
   btnPin.classList.remove('is-on');
   if (cfg.hasPin) btnPin.querySelector('.lbl').textContent = 'Pin: Corners';
 
@@ -394,6 +394,7 @@ function loadSim(nextKey) {
 
   if (cfg.hint) hintEl.textContent = cfg.hint;
   for (const b of segBtns) b.classList.toggle('is-active', b.dataset.sim === nextKey);
+  positionSeg();
 }
 
 // --- ui -------------------------------------------------------------------
@@ -418,7 +419,53 @@ const btnStep = document.getElementById('btn-step');
 const btnView = document.getElementById('btn-view');
 const btnFull = document.getElementById('btn-fullscreen');
 const segBtns = Array.from(document.querySelectorAll('.seg__btn'));
+const segNav = document.getElementById('sim-switch');
+const segHL = document.querySelector('.seg__hl');
+const pinWrap = document.querySelector('.pin-wrap');
 const hintEl = document.querySelector('.hint');
+
+// Position a sliding/resizing highlighter to wrap the active button in a pill nav.
+// Geometry is computed deterministically (collapsed icon width + the label's
+// natural scrollWidth) so it's correct immediately, even while the label is still
+// animating open — no measuring mid-transition. Pass activeIdx = -1 to hide it.
+function positionHL(nav, btns, hl, activeIdx) {
+  if (!nav || !hl || !btns.length) return;
+  if (activeIdx < 0) {
+    hl.style.width = '0px';
+    nav.classList.remove('has-open');
+    return;
+  }
+  nav.classList.add('has-open');
+  const ncs = getComputedStyle(nav);
+  const padL = parseFloat(ncs.paddingLeft) || 0;
+  const padT = parseFloat(ncs.paddingTop) || 0;
+  const gap = parseFloat(ncs.columnGap || ncs.gap) || 0;
+  const active = btns[activeIdx];
+  const bcs = getComputedStyle(active);
+  const ico = active.querySelector('.ico');
+  // Collapsed (icon-only) width is identical for every button and independent of
+  // any in-flight label transition, so derive it from the always-visible icon +
+  // the button's horizontal padding/border (NOT a sibling's offsetWidth, which is
+  // still mid-collapse right after a switch).
+  const iconW =
+    (ico ? ico.offsetWidth : 0) +
+    (parseFloat(bcs.paddingLeft) || 0) +
+    (parseFloat(bcs.paddingRight) || 0) +
+    (parseFloat(bcs.borderLeftWidth) || 0) +
+    (parseFloat(bcs.borderRightWidth) || 0);
+  const lbl = active.querySelector('.lbl');
+  const labelW = lbl ? lbl.scrollWidth : 0; // natural width regardless of clip
+  const left = padL + activeIdx * (iconW + gap);
+  hl.style.transform = `translate(${left}px, ${padT}px)`;
+  hl.style.width = `${iconW + labelW}px`;
+  hl.style.height = `${active.offsetHeight}px`;
+}
+
+// Sim-mode highlighter: always tracks the currently-active mode.
+function positionSeg() {
+  const i = segBtns.findIndex((b) => b.classList.contains('is-active'));
+  positionHL(segNav, segBtns, segHL, i);
+}
 
 let speed = 1; // sim-time multiplier
 let paused = false;
@@ -512,37 +559,76 @@ document.addEventListener('fullscreenchange', () => {
   btnFull.setAttribute('aria-label', fsLabel);
 });
 
-// --- About / Settings modals ---------------------------------------------
-const modalAbout = document.getElementById('modal-about');
-const modalSettings = document.getElementById('modal-settings');
+// --- About / Settings disclosure (expanding pill + flow-down sheet) -------
+const disclosure = document.getElementById('disclosure');
+const navPill = disclosure.querySelector('.navpill');
+const navHL = disclosure.querySelector('.navpill__hl');
+const btnAbout = document.getElementById('btn-about');
+const btnSettings = document.getElementById('btn-settings');
+const navBtns = [btnAbout, btnSettings];
+const PANELS = {
+  about: { btn: btnAbout, sheet: document.getElementById('sheet-about') },
+  settings: { btn: btnSettings, sheet: document.getElementById('sheet-settings') },
+};
+let openPanel = null;
+const sheetTimers = new WeakMap();
 
-function openModal(m) {
-  m.hidden = false;
-  // Force a reflow before adding the class so the entrance transition runs from
-  // the hidden state (rAF would stall in a backgrounded/headless tab).
-  void m.offsetWidth;
-  m.classList.add('is-open');
-}
-function closeModal(m) {
-  m.classList.remove('is-open');
-  setTimeout(() => {
-    m.hidden = true;
-  }, 240);
+// Highlighter that slides between About and Settings (hidden when both closed).
+function positionNav() {
+  const i = navBtns.findIndex((b) => b.classList.contains('is-open'));
+  positionHL(navPill, navBtns, navHL, i);
 }
 
-document.getElementById('btn-about').addEventListener('click', () => openModal(modalAbout));
-document.getElementById('btn-settings').addEventListener('click', () => openModal(modalSettings));
-
-// Close on scrim or close-button click (both carry data-close); inside-card clicks are ignored.
-for (const m of [modalAbout, modalSettings]) {
-  m.addEventListener('click', (e) => {
-    if (e.target.closest('[data-close]')) closeModal(m);
-  });
+// Expand/collapse one panel: the pill label opens and the sheet flows down. The
+// sheet is unhidden, reflowed, then transitioned (rAF stalls in headless tabs).
+function setPanel(key, open) {
+  const p = PANELS[key];
+  if (!p) return;
+  p.btn.classList.toggle('is-open', open);
+  p.btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) {
+    clearTimeout(sheetTimers.get(p.sheet));
+    p.sheet.hidden = false;
+    void p.sheet.offsetWidth;
+    p.sheet.classList.add('is-open');
+  } else {
+    p.sheet.classList.remove('is-open');
+    sheetTimers.set(
+      p.sheet,
+      setTimeout(() => {
+        p.sheet.hidden = true;
+      }, 440),
+    );
+  }
 }
+
+function openDisclosure(key) {
+  if (openPanel && openPanel !== key) setPanel(openPanel, false);
+  openPanel = key;
+  setPanel(key, true);
+  positionNav();
+}
+
+function closeDisclosure() {
+  if (!openPanel) return;
+  setPanel(openPanel, false);
+  openPanel = null;
+  positionNav();
+}
+
+btnAbout.addEventListener('click', () =>
+  openPanel === 'about' ? closeDisclosure() : openDisclosure('about'),
+);
+btnSettings.addEventListener('click', () =>
+  openPanel === 'settings' ? closeDisclosure() : openDisclosure('settings'),
+);
+
+// A pointer-down anywhere outside the disclosure dismisses the open sheet.
+document.addEventListener('pointerdown', (e) => {
+  if (openPanel && !e.target.closest('#disclosure')) closeDisclosure();
+});
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
-  if (!modalAbout.hidden) closeModal(modalAbout);
-  if (!modalSettings.hidden) closeModal(modalSettings);
+  if (e.key === 'Escape') closeDisclosure();
 });
 
 // --- settings toggles -----------------------------------------------------
@@ -709,6 +795,8 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  positionSeg(); // pill geometry is layout-dependent
+  positionNav();
 });
 
 // Map a normalized speed [0,1] to a blue(slow) -> orange(fast) color.
@@ -795,6 +883,12 @@ function schedule() {
 loadSim('collisions'); // build the initial sim + scene
 render(); // paint the first frame before the loop ticks
 schedule();
+
+// Label widths shift when the brand/UI webfonts finish loading — re-measure the
+// sim-mode highlighter so it keeps hugging the active mode after the font swap.
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(positionSeg);
+}
 
 // Engine is up and the first frame is on screen — fade out the boot loader.
 const loaderEl = document.getElementById('loader');
