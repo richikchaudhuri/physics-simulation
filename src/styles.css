@@ -5,6 +5,36 @@
    gone; depth comes from translucency, blur and soft shadow instead.
    ========================================================================== */
 
+/* Rostex — display face for the wordmark (self-hosted; Vite hashes + base-paths it). */
+@font-face {
+  font-family: "Rostex";
+  src: url("./fonts/rostex-regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Rostex";
+  src: url("./fonts/rostex-oblique.otf") format("opentype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Rostex Outline";
+  src: url("./fonts/rostex-outline.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Rostex Outline";
+  src: url("./fonts/rostex-obliqueoutline.otf") format("opentype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
 :root {
   --bg: #08080a;
   --bg-hi: #14141b; /* radial-gradient highlight */
@@ -20,6 +50,7 @@
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
   --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Code", Consolas, monospace;
+  --font-brand: "Rostex", "Instrument Serif", Georgia, serif;
 
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
@@ -114,9 +145,9 @@ body {
 }
 
 .loader__word {
-  font-family: var(--font-display);
-  font-size: 28px;
-  letter-spacing: 0.01em;
+  font-family: var(--font-brand);
+  font-size: 30px;
+  letter-spacing: 0.03em;
   color: var(--ink);
 }
 
@@ -139,16 +170,128 @@ body {
   justify-content: space-between;
 }
 
-/* Frosted, borderless control surface. */
+/* Top group: stacks the chrome bar above the control panel, both left-aligned. */
+.ui-top {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  width: 100%;
+}
+
+/* Chrome bar spans the top: quick-action pill (left), About/Settings (right). */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  animation: rise 0.6s var(--ease) both;
+}
+
+/* Quick-action pill — a single rounded capsule holding two icon buttons. */
+.pill {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(16px) saturate(118%);
+  -webkit-backdrop-filter: blur(16px) saturate(118%);
+  box-shadow: 0 12px 30px -16px rgba(0, 0, 0, 0.7);
+}
+
+.pill__div {
+  width: 1px;
+  height: 18px;
+  background: var(--faint);
+}
+
+.iconbtn {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  text-decoration: none;
+  transition:
+    background 0.18s var(--ease),
+    color 0.18s var(--ease);
+}
+
+.iconbtn:hover {
+  color: var(--ink);
+  background: var(--faint-2);
+}
+
+.iconbtn.is-on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.topbar__right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* About / Settings — pill chips with a leading icon. */
+.chip {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 15px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(16px) saturate(118%);
+  -webkit-backdrop-filter: blur(16px) saturate(118%);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  box-shadow: 0 12px 30px -16px rgba(0, 0, 0, 0.7);
+  transition:
+    background 0.18s var(--ease),
+    color 0.18s var(--ease);
+}
+
+.chip:hover {
+  background: var(--faint-3);
+}
+
+.chip .ico {
+  display: inline-flex;
+  color: var(--muted);
+  transition: color 0.18s var(--ease);
+}
+
+.chip:hover .ico {
+  color: var(--accent);
+}
+
+/* Frosted control surface with a soft white frame and rounded corners. */
 .panel {
   pointer-events: auto;
   width: 264px;
   border: 1px solid var(--line);
+  border-radius: 18px;
   background: var(--panel-bg);
   backdrop-filter: blur(16px) saturate(118%);
   -webkit-backdrop-filter: blur(16px) saturate(118%);
   box-shadow: 0 24px 60px -18px rgba(0, 0, 0, 0.7);
-  animation: rise 0.6s var(--ease) both;
+  animation: rise 0.6s 0.05s var(--ease) both;
 }
 
 .panel__head {
@@ -160,11 +303,11 @@ body {
 }
 
 .wordmark {
-  font-family: var(--font-display);
+  font-family: var(--font-brand);
   font-weight: 400;
-  font-size: 31px;
-  line-height: 1.05;
-  letter-spacing: 0.01em;
+  font-size: 33px;
+  line-height: 1.04;
+  letter-spacing: 0.035em;
   color: var(--ink);
 }
 
@@ -186,7 +329,7 @@ body {
 
 .seg__btn {
   background: transparent;
-  border: 1px solid var(--line);
+  border: none;
   color: var(--muted);
   font: inherit;
   font-size: 12px;
@@ -194,7 +337,7 @@ body {
   letter-spacing: 0.06em;
   padding: 10px 6px;
   cursor: pointer;
-  border-radius: 2px;
+  border-radius: 9px;
   transition:
     background 0.2s var(--ease),
     color 0.2s var(--ease);
@@ -344,7 +487,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 
 .select__btn {
   background: var(--faint-2);
-  border: 1px solid var(--line);
+  border: none;
   color: var(--muted);
   font: inherit;
   font-size: 11.5px;
@@ -352,7 +495,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   letter-spacing: 0.04em;
   padding: 9px 4px;
   cursor: pointer;
-  border-radius: 2px;
+  border-radius: 9px;
   transition:
     background 0.18s var(--ease),
     color 0.18s var(--ease);
@@ -366,7 +509,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .select__btn.is-active {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--ink);
-  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 /* --- action buttons ------------------------------------------------------- */
@@ -379,21 +522,54 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 
 .btn {
   pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   background: var(--faint-2);
   border: none;
   color: var(--ink);
-  padding: 12px 8px;
+  padding: 11px 8px;
   font: inherit;
   font-size: 12px;
   font-weight: 500;
   text-transform: lowercase;
   letter-spacing: 0.06em;
   cursor: pointer;
-  border-radius: 2px;
+  border-radius: 11px;
   transition:
     background 0.18s var(--ease),
     color 0.18s var(--ease),
     box-shadow 0.18s var(--ease);
+}
+
+/* Leading icon inside action buttons (mutes at rest, follows text on hover/on). */
+.btn .ico {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+  transition: color 0.18s var(--ease);
+}
+
+.btn:hover .ico {
+  color: var(--ink);
+}
+
+.btn.is-on .ico {
+  color: var(--accent);
+}
+
+/* Pause/play icon swap: show "play" only while toggled on (paused). */
+.btn .ico--play {
+  display: none;
+}
+
+.btn.is-on .ico--pause {
+  display: none;
+}
+
+.btn.is-on .ico--play {
+  display: inline-flex;
 }
 
 .btn:hover {
@@ -431,13 +607,219 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   color: var(--muted);
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  border: 1px solid var(--line);
   background: rgba(8, 8, 10, 0.4);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  padding: 8px 16px;
-  border-radius: 2px;
+  padding: 9px 18px;
+  border-radius: 999px;
   animation: rise 0.6s 0.1s var(--ease) both;
+}
+
+/* --- modals (About / Settings) ------------------------------------------- */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 4, 6, 0.6);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  opacity: 0;
+  transition: opacity 0.22s var(--ease);
+}
+
+.modal.is-open .modal__scrim {
+  opacity: 1;
+}
+
+.modal__card {
+  position: relative;
+  width: 100%;
+  max-width: 430px;
+  padding: 32px 32px 28px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: rgba(13, 14, 19, 0.94);
+  backdrop-filter: blur(22px) saturate(120%);
+  -webkit-backdrop-filter: blur(22px) saturate(120%);
+  box-shadow: 0 44px 90px -30px rgba(0, 0, 0, 0.82);
+  opacity: 0;
+  transform: translateY(14px) scale(0.98);
+  transition:
+    opacity 0.24s var(--ease),
+    transform 0.24s var(--ease);
+}
+
+.modal.is-open .modal__card {
+  opacity: 1;
+  transform: none;
+}
+
+.modal__close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: var(--faint-2);
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background 0.18s var(--ease),
+    color 0.18s var(--ease);
+}
+
+.modal__close:hover {
+  background: var(--faint-3);
+  color: var(--ink);
+}
+
+.modal__title {
+  font-family: var(--font-brand);
+  font-weight: 400;
+  font-size: 31px;
+  letter-spacing: 0.03em;
+  color: var(--ink);
+  margin-bottom: 16px;
+}
+
+.modal__lead {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink);
+  margin-bottom: 12px;
+}
+
+.modal__text {
+  font-size: 12.5px;
+  line-height: 1.62;
+  color: var(--muted);
+  margin-bottom: 20px;
+}
+
+.modal__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 24px;
+}
+
+.modal__tags span {
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 5px 11px;
+  border: 1px solid var(--faint);
+  border-radius: 999px;
+}
+
+.modal__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background 0.18s var(--ease);
+}
+
+.modal__link:hover {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+/* Settings rows + animated toggle switch. */
+.setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 0;
+  border-top: 1px solid var(--faint);
+  cursor: pointer;
+}
+
+.setting:first-of-type {
+  border-top: none;
+}
+
+.setting__text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.setting__name {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.setting__desc {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.setting__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.switch {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--faint);
+  transition: background 0.2s var(--ease);
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--ink);
+  transition: transform 0.2s var(--ease);
+}
+
+.setting__input:checked + .switch {
+  background: var(--accent);
+}
+
+.setting__input:checked + .switch::after {
+  transform: translateX(18px);
+}
+
+.setting__input:focus-visible + .switch {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 /* --- motion --------------------------------------------------------------- */
@@ -480,11 +862,37 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   }
 }
 
+/* Manual override from the Settings panel (independent of the OS preference). */
+body.reduce-motion *,
+body.reduce-motion *::before,
+body.reduce-motion *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+
 /* --- responsive: compact bottom-sheet panel on phones --------------------- */
 @media (max-width: 560px) {
   #ui {
     padding: 14px;
     padding-bottom: max(14px, env(safe-area-inset-bottom));
+  }
+
+  .ui-top {
+    gap: 12px;
+  }
+
+  /* Icon-only chips to keep the top row compact on phones. */
+  .chip .lbl {
+    display: none;
+  }
+
+  .chip {
+    padding: 9px;
+  }
+
+  .topbar__right {
+    gap: 6px;
   }
 
   .panel {

@@ -384,7 +384,7 @@ function loadSim(nextKey) {
   pinMode = 0;
   btnPin.style.display = cfg.hasPin ? '' : 'none';
   btnPin.classList.remove('is-on');
-  if (cfg.hasPin) btnPin.textContent = 'Pin: Corners';
+  if (cfg.hasPin) btnPin.querySelector('.lbl').textContent = 'Pin: Corners';
 
   buildWorld(cfg.defaultCount);
 
@@ -477,13 +477,13 @@ windSlider.addEventListener('input', () => {
 btnPin.addEventListener('click', () => {
   pinMode = pinMode === 0 ? 1 : 0;
   world.set_param(2, pinMode);
-  btnPin.textContent = pinMode === 1 ? 'Pin: Top Edge' : 'Pin: Corners';
+  btnPin.querySelector('.lbl').textContent = pinMode === 1 ? 'Pin: Top Edge' : 'Pin: Corners';
   btnPin.classList.toggle('is-on', pinMode === 1);
 });
 
 btnPause.addEventListener('click', () => {
   paused = !paused;
-  btnPause.textContent = paused ? 'Play' : 'Pause';
+  btnPause.querySelector('.lbl').textContent = paused ? 'Play' : 'Pause';
   btnPause.classList.toggle('is-on', paused);
 });
 
@@ -504,7 +504,66 @@ btnFull.addEventListener('click', () => {
   else document.documentElement.requestFullscreen?.().catch(() => {});
 });
 document.addEventListener('fullscreenchange', () => {
-  btnFull.textContent = document.fullscreenElement ? 'Exit Fullscreen' : 'Fullscreen';
+  // The button is icon-only now, so reflect state via a class + label rather than text.
+  const fs = !!document.fullscreenElement;
+  btnFull.classList.toggle('is-on', fs);
+  const fsLabel = fs ? 'Exit fullscreen' : 'Fullscreen';
+  btnFull.title = fsLabel;
+  btnFull.setAttribute('aria-label', fsLabel);
+});
+
+// --- About / Settings modals ---------------------------------------------
+const modalAbout = document.getElementById('modal-about');
+const modalSettings = document.getElementById('modal-settings');
+
+function openModal(m) {
+  m.hidden = false;
+  // Force a reflow before adding the class so the entrance transition runs from
+  // the hidden state (rAF would stall in a backgrounded/headless tab).
+  void m.offsetWidth;
+  m.classList.add('is-open');
+}
+function closeModal(m) {
+  m.classList.remove('is-open');
+  setTimeout(() => {
+    m.hidden = true;
+  }, 240);
+}
+
+document.getElementById('btn-about').addEventListener('click', () => openModal(modalAbout));
+document.getElementById('btn-settings').addEventListener('click', () => openModal(modalSettings));
+
+// Close on scrim or close-button click (both carry data-close); inside-card clicks are ignored.
+for (const m of [modalAbout, modalSettings]) {
+  m.addEventListener('click', (e) => {
+    if (e.target.closest('[data-close]')) closeModal(m);
+  });
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!modalAbout.hidden) closeModal(modalAbout);
+  if (!modalSettings.hidden) closeModal(modalSettings);
+});
+
+// --- settings toggles -----------------------------------------------------
+// High quality: full device pixel ratio (capped at 2) vs 1 for performance.
+const setQuality = document.getElementById('set-quality');
+setQuality.addEventListener('change', () => {
+  renderer.setPixelRatio(setQuality.checked ? Math.min(window.devicePixelRatio, 2) : 1);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Vignette: toggle the decorative edge darkening.
+const vignetteEl = document.querySelector('.vignette');
+const setVignette = document.getElementById('set-vignette');
+setVignette.addEventListener('change', () => {
+  vignetteEl.style.display = setVignette.checked ? '' : 'none';
+});
+
+// Reduce motion: kill UI transitions/animations regardless of the OS preference.
+const setMotion = document.getElementById('set-motion');
+setMotion.addEventListener('change', () => {
+  document.body.classList.toggle('reduce-motion', setMotion.checked);
 });
 
 // Re-push the current slider/toggle state onto a freshly-built World (reset spins
