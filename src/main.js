@@ -173,7 +173,9 @@ let bodyCount = cfg.defaultCount;
 
 // --- renderer / scene -----------------------------------------------------
 const canvas = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+// preserveDrawingBuffer keeps the rendered frame readable by canvas.toBlob for
+// the screenshot feature (S key), at a negligible cost for this scene.
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 
@@ -580,7 +582,10 @@ function frameCamera() {
 }
 
 // Switch to a different sim: reconfigure environment, controls, UI, then build.
-function loadSim(nextKey) {
+// `restore` (optional) carries persisted control state (URL hash / localStorage);
+// each per-sim default below falls back to it so a shared link or a return visit
+// reopens with the user's exact settings.
+function loadSim(nextKey, restore) {
   if (!SIMS[nextKey]) return;
   simKey = nextKey;
   cfg = SIMS[nextKey];
@@ -591,11 +596,19 @@ function loadSim(nextKey) {
   grid.visible = cfg.showGrid;
   box.visible = cfg.boxed;
 
+  // Speed is a global multiplier (not per-sim), so only a restore touches it.
+  if (restore?.spd != null) {
+    speed = clamp(restore.spd, parseFloat(speedSlider.min), parseFloat(speedSlider.max));
+    speedSlider.value = String(speed);
+    speedLabel.textContent = `${speed.toFixed(1)}×`;
+  }
+
   countName.textContent = cfg.countName || 'Count';
   countSlider.min = String(cfg.minCount);
   countSlider.max = String(cfg.maxCount);
-  countSlider.value = String(cfg.defaultCount);
-  countLabel.textContent = String(cfg.defaultCount);
+  const initCount = restore?.n != null ? clamp(Math.round(restore.n), cfg.minCount, cfg.maxCount) : cfg.defaultCount;
+  countSlider.value = String(initCount);
+  countLabel.textContent = String(initCount);
 
   // The gravity control is shared; each sim relabels/rescales it (and a fresh
   // World starts at the matching default, so no set_param push is needed here).
@@ -605,8 +618,9 @@ function loadSim(nextKey) {
     gravSlider.min = String(cfg.gravMin);
     gravSlider.max = String(cfg.gravMax);
     gravSlider.step = String(cfg.gravStep);
-    gravSlider.value = String(cfg.gravDefault);
-    gravLabel.textContent = cfg.gravDefault.toFixed(cfg.gravDecimals ?? 1);
+    const g = restore?.g != null ? clamp(restore.g, cfg.gravMin, cfg.gravMax) : cfg.gravDefault;
+    gravSlider.value = String(g);
+    gravLabel.textContent = g.toFixed(cfg.gravDecimals ?? 1);
   }
 
   // Wind control (cloth only): same shared-default trick as gravity.
@@ -616,25 +630,26 @@ function loadSim(nextKey) {
     windSlider.min = String(cfg.windMin);
     windSlider.max = String(cfg.windMax);
     windSlider.step = String(cfg.windStep);
-    windSlider.value = String(cfg.windDefault);
-    windLabel.textContent = cfg.windDefault.toFixed(1);
+    const w = restore?.w != null ? clamp(restore.w, cfg.windMin, cfg.windMax) : cfg.windDefault;
+    windSlider.value = String(w);
+    windLabel.textContent = w.toFixed(1);
   }
 
-  // Pin toggle (cloth only): always starts at corners-pinned.
-  pinMode = 0;
+  // Pin toggle (cloth only): defaults to corners-pinned unless a restore overrides.
+  pinMode = cfg.hasPin ? (restore?.pin ?? 0) : 0;
   btnPin.style.display = cfg.hasPin ? '' : 'none';
-  btnPin.classList.remove('is-on');
-  if (cfg.hasPin) btnPin.querySelector('.lbl').textContent = 'Pin: Corners';
+  btnPin.classList.toggle('is-on', pinMode === 1);
+  if (cfg.hasPin) btnPin.querySelector('.lbl').textContent = pinMode === 1 ? 'Pin: Top Edge' : 'Pin: Corners';
 
   // Gradient-descent selector state (read by reapplyParams inside buildWorld, so
   // it must be set BEFORE the build).
   if (cfg.contour) {
-    landscapeIdx = cfg.defaultLandscape ?? 0;
-    optimizerIdx = cfg.defaultOptimizer ?? 3;
-    betaVal = cfg.betaDefault ?? 0.9;
+    landscapeIdx = restore?.land ?? cfg.defaultLandscape ?? 0;
+    optimizerIdx = restore?.opt ?? cfg.defaultOptimizer ?? 3;
+    betaVal = restore?.beta ?? cfg.betaDefault ?? 0.9;
   }
 
-  buildWorld(cfg.defaultCount);
+  buildWorld(initCount);
 
   // Landscape / optimizer / beta controls (gradient-descent only). Built AFTER
   // buildWorld so `world` exists for the pick handlers.
@@ -648,11 +663,13 @@ function loadSim(nextKey) {
       world.set_param(1, i); // rebuilds the grid + re-seeds walkers in Rust
       refreshContourTexture();
       primeTrails();
+      schedulePersist();
     });
     buildSelect(optimizerNav, cfg.optimizers, optimizerIdx, (i) => {
       optimizerIdx = i;
       world.set_param(2, i); // re-seeds for a fair restart
       primeTrails();
+      schedulePersist();
     });
     if (cfg.hasBeta) {
       betaSlider.min = String(cfg.betaMin);
@@ -669,6 +686,8 @@ function loadSim(nextKey) {
 
   if (cfg.hint) hintEl.textContent = cfg.hint;
   for (const b of segBtns) b.classList.toggle('is-active', b.dataset.sim === nextKey);
+
+  schedulePersist();
 }
 
 // Fill a `.select` nav with one borderless button per label; clicking re-marks
@@ -738,9 +757,13 @@ function setFill(el) {
 function refreshFills() {
   for (const el of document.querySelectorAll('input[type="range"]')) setFill(el);
 }
-// One delegated listener keeps every slider's fill in sync as it's dragged.
+// One delegated listener keeps every slider's fill in sync as it's dragged, and
+// schedules a (debounced) persist so any slider change lands in URL + storage.
 document.querySelector('.panel').addEventListener('input', (e) => {
-  if (e.target.matches('input[type="range"]')) setFill(e.target);
+  if (e.target.matches('input[type="range"]')) {
+    setFill(e.target);
+    schedulePersist();
+  }
 });
 
 for (const b of segBtns) {
@@ -789,6 +812,7 @@ btnPin.addEventListener('click', () => {
   world.set_param(2, pinMode);
   btnPin.querySelector('.lbl').textContent = pinMode === 1 ? 'Pin: Top Edge' : 'Pin: Corners';
   btnPin.classList.toggle('is-on', pinMode === 1);
+  schedulePersist();
 });
 
 btnPause.addEventListener('click', () => {
@@ -1126,7 +1150,152 @@ function schedule() {
   }
 }
 
-loadSim('collisions'); // build the initial sim + scene
+// --- state persistence: shareable URL hash + localStorage -------------------
+// One compact snapshot of the user-facing controls, written to the location hash
+// (shareable) and localStorage (sticky across visits). Only keys relevant to the
+// active sim are included. loadSim() reads this same shape back via its `restore`
+// argument, so a shared link or a return visit reopens with the exact settings.
+const LS_KEY = 'physics-sandbox-state';
+let restoring = false; // true while applying persisted state — suppresses re-persist
+let persistTimer = 0;
+
+function currentState() {
+  const st = { sim: simKey, n: parseInt(countSlider.value, 10), spd: speed };
+  if (cfg.hasGravityParam) st.g = parseFloat(gravSlider.value);
+  if (cfg.hasWind) st.w = parseFloat(windSlider.value);
+  if (cfg.hasPin) st.pin = pinMode;
+  if (cfg.contour) {
+    st.land = landscapeIdx;
+    st.opt = optimizerIdx;
+    if (cfg.hasBeta) st.beta = betaVal;
+  }
+  return st;
+}
+
+function writeHash() {
+  const hash = '#' + Object.entries(currentState()).map(([k, v]) => `${k}=${v}`).join('&');
+  // replaceState avoids spamming browser history (and doesn't fire hashchange).
+  history.replaceState(null, '', hash);
+}
+
+function saveLocal() {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(currentState()));
+  } catch {
+    /* storage unavailable (private mode / quota) — non-fatal */
+  }
+}
+
+// Debounced: a slider drag fires many input events; persist once it settles.
+function schedulePersist() {
+  if (restoring) return;
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    writeHash();
+    saveLocal();
+  }, 250);
+}
+
+// Parse a snapshot from the hash (k=v&...) or a localStorage JSON string. Returns
+// null unless it names a known sim, so a malformed/foreign source is ignored.
+function parseState(raw, fromHash) {
+  if (!raw) return null;
+  let st = null;
+  if (fromHash) {
+    st = {};
+    for (const part of raw.replace(/^#/, '').split('&')) {
+      if (!part) continue;
+      const [k, v] = part.split('=');
+      if (k === 'sim') st.sim = v;
+      else if (v !== undefined && v !== '') st[k] = Number(v);
+    }
+  } else {
+    try {
+      st = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  return st && st.sim && SIMS[st.sim] ? st : null;
+}
+
+function loadLocal() {
+  try {
+    return parseState(localStorage.getItem(LS_KEY), false);
+  } catch {
+    return null;
+  }
+}
+
+// Re-apply state when the hash is edited/navigated in an already-open tab.
+// (writeHash uses replaceState, which doesn't fire this — so no feedback loop.)
+window.addEventListener('hashchange', () => {
+  const st = parseState(location.hash, true);
+  if (!st) return;
+  restoring = true;
+  loadSim(st.sim, st);
+  restoring = false;
+});
+
+// --- keyboard shortcuts -----------------------------------------------------
+// space=pause, R=reset, F=fullscreen, S=screenshot, 1-N=sims. Ignored while
+// typing in a control, with a modal open, or with a modifier held.
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (!modalAbout.hidden || !modalSettings.hidden) return;
+
+  if (e.key >= '1' && e.key <= '9') {
+    const seg = segBtns[parseInt(e.key, 10) - 1];
+    if (seg) loadSim(seg.dataset.sim);
+    return;
+  }
+  switch (e.key) {
+    case ' ': // space toggles pause globally (preventDefault stops page scroll)
+      e.preventDefault();
+      btnPause.click();
+      break;
+    case 'r':
+    case 'R':
+      document.getElementById('btn-reset').click();
+      break;
+    case 'f':
+    case 'F':
+      btnFull.click();
+      break;
+    case 's':
+    case 'S':
+      e.preventDefault();
+      captureScreenshot();
+      break;
+  }
+});
+
+// --- screenshot (PNG download) ----------------------------------------------
+// Render the current frame, then snapshot the canvas. preserveDrawingBuffer (set
+// on the renderer) keeps the buffer readable here.
+function captureScreenshot() {
+  render();
+  renderer.domElement.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `physics-${simKey}-${Date.now()}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, 'image/png');
+}
+
+// Boot at the persisted state if any (URL hash wins over localStorage), else the
+// default sim. restoring=true keeps boot from rewriting a clean URL.
+const bootState = parseState(location.hash, true) || loadLocal();
+restoring = true;
+loadSim(bootState ? bootState.sim : 'collisions', bootState); // build the initial sim + scene
+restoring = false;
 render(); // paint the first frame before the loop ticks
 schedule();
 
