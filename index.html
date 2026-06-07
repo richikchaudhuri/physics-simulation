@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>Physics Sandbox</title>
+    <title>Physics Simulator</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -21,7 +21,7 @@
     <!-- Branded boot screen shown until the WASM engine initializes, then fades out. -->
     <div id="loader" class="loader" role="status" aria-live="polite">
       <div class="loader__mark" aria-hidden="true"><span></span></div>
-      <p class="loader__word">Physics&nbsp;Sandbox</p>
+      <p class="loader__word">Physics&nbsp;Simulator</p>
       <p class="loader__sub">Initializing engine</p>
     </div>
 
@@ -45,6 +45,34 @@
             <button class="iconbtn" id="btn-fullscreen" title="Fullscreen" aria-label="Toggle fullscreen">
               <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V5a1 1 0 0 1 1-1h4M20 9V5a1 1 0 0 0-1-1h-4M4 15v4a1 1 0 0 0 1 1h4M20 15v4a1 1 0 0 1-1 1h-4"/></svg>
             </button>
+          </div>
+
+          <!-- Centered masthead: brand wordmark above the mode pill nav. -->
+          <div class="masthead">
+            <h1 class="wordmark">Physics Simulator</h1>
+            <nav class="seg" id="sim-switch" aria-label="Choose simulation">
+              <span class="seg__hl" aria-hidden="true"></span>
+              <button class="seg__btn is-active" data-sim="collisions" title="Collisions" aria-label="Collisions">
+                <span class="ico"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8.5" cy="13.5" r="4.5"/><circle cx="17.5" cy="9" r="3"/></svg></span>
+                <span class="lbl">Collisions</span>
+              </button>
+              <button class="seg__btn" data-sim="gravity" title="Gravity" aria-label="Gravity">
+                <span class="ico"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/><ellipse cx="12" cy="12" rx="9" ry="3.8" transform="rotate(-28 12 12)"/></svg></span>
+                <span class="lbl">Gravity</span>
+              </button>
+              <button class="seg__btn" data-sim="pendulum" title="Pendulum" aria-label="Pendulum">
+                <span class="ico"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="4" r="1.1" fill="currentColor" stroke="none"/><path d="M12 4 8 12.5 14.5 17"/><circle cx="8" cy="12.5" r="1.6"/><circle cx="14.5" cy="17" r="1.9"/></svg></span>
+                <span class="lbl">Pendulum</span>
+              </button>
+              <button class="seg__btn" data-sim="cloth" title="Cloth" aria-label="Cloth">
+                <span class="ico"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8q3-3 6 0t6 0 6 0"/><path d="M3 14q3-3 6 0t6 0 6 0"/></svg></span>
+                <span class="lbl">Cloth</span>
+              </button>
+              <button class="seg__btn" data-sim="descent" title="Gradient Descent" aria-label="Gradient Descent">
+                <span class="ico"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 5C5 13 8 17 12 17 16 17 19 13 19 5"/><circle cx="12" cy="15" r="1.9" fill="currentColor" stroke="none"/></svg></span>
+                <span class="lbl">Gradient Descent</span>
+              </button>
+            </nav>
           </div>
 
           <div class="disclosure" id="disclosure">
@@ -111,31 +139,7 @@
         </div>
 
         <section class="panel" aria-label="Simulation controls">
-          <header class="panel__head">
-            <h1 class="wordmark">Physics Sandbox</h1>
-          </header>
-
           <div class="panel__body">
-            <nav class="seg" id="sim-switch" aria-label="Choose simulation">
-              <span class="seg__hl" aria-hidden="true"></span>
-              <button class="seg__btn is-active" data-sim="collisions" title="Collisions" aria-label="Collisions">
-                <span class="ico"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8.5" cy="13.5" r="4.5"/><circle cx="17.5" cy="9" r="3"/></svg></span>
-                <span class="lbl">Collisions</span>
-              </button>
-              <button class="seg__btn" data-sim="gravity" title="Gravity" aria-label="Gravity">
-                <span class="ico"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none"/><ellipse cx="12" cy="12" rx="9" ry="3.8" transform="rotate(-28 12 12)"/></svg></span>
-                <span class="lbl">Gravity</span>
-              </button>
-              <button class="seg__btn" data-sim="pendulum" title="Pendulum" aria-label="Pendulum">
-                <span class="ico"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="4" r="1.1" fill="currentColor" stroke="none"/><path d="M12 4 8 12.5 14.5 17"/><circle cx="8" cy="12.5" r="1.6"/><circle cx="14.5" cy="17" r="1.9"/></svg></span>
-                <span class="lbl">Pendulum</span>
-              </button>
-              <button class="seg__btn" data-sim="cloth" title="Cloth" aria-label="Cloth">
-                <span class="ico"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8q3-3 6 0t6 0 6 0"/><path d="M3 14q3-3 6 0t6 0 6 0"/></svg></span>
-                <span class="lbl">Cloth</span>
-              </button>
-            </nav>
-
             <div class="stats">
               <div class="stat"><span class="stat__label">Bodies</span><span class="stat__val" id="stat-count">&mdash;</span></div>
               <div class="stat"><span class="stat__label">FPS</span><span class="stat__val" id="stat-fps">&mdash;</span></div>

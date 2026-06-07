@@ -181,11 +181,28 @@ body {
 
 /* Chrome bar spans the top: quick-action pill (left), About/Settings (right). */
 .topbar {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
   width: 100%;
   animation: rise 0.6s var(--ease) both;
+}
+
+/* Centered floating masthead: brand wordmark above the mode pill nav. Absolutely
+   centered so it sits screen-centre regardless of the side groups' widths. Only
+   the pill nav inside is interactive; the wordmark/container stay click-through. */
+.masthead {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  pointer-events: none;
+  animation: rise-center 0.6s var(--ease) both;
 }
 
 /* Quick-action pill — a single rounded capsule holding two icon buttons. */
@@ -447,21 +464,20 @@ body {
   animation: rise 0.6s 0.05s var(--ease) both;
 }
 
-.panel__head {
-  padding: 24px 26px 18px;
-}
-
 .panel__body {
-  padding: 4px 26px 24px;
+  padding: 24px 26px 24px;
 }
 
+/* Brand wordmark — lives in the centered masthead above the mode pill nav. */
 .wordmark {
   font-family: var(--font-brand);
   font-weight: 400;
-  font-size: 36px;
-  line-height: 1.14;
-  letter-spacing: 0.035em;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: 0.05em;
   color: var(--ink);
+  white-space: nowrap;
+  text-align: center;
 }
 
 .sub {
@@ -477,22 +493,30 @@ body {
    highlighter (.seg__hl) is positioned by JS and slides + resizes between modes. */
 .seg {
   position: relative;
-  display: flex;
+  pointer-events: auto; /* the only interactive part of the click-through masthead */
+  display: inline-flex;
   align-items: stretch;
   gap: 4px;
-  margin-bottom: 24px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(16px) saturate(118%);
+  -webkit-backdrop-filter: blur(16px) saturate(118%);
+  box-shadow: 0 12px 30px -16px rgba(0, 0, 0, 0.7);
 }
 
-/* The sliding/resizing highlight behind the active mode (geometry set in JS). */
+/* The sliding/resizing highlight behind the active mode (geometry set in JS).
+   Carries the per-sim accent so the nav reflects the current simulation's hue. */
 .seg__hl {
   position: absolute;
   top: 0;
   left: 0;
   width: 0;
-  height: 100%;
-  border-radius: 12px;
-  background: var(--faint-3);
-  box-shadow: inset 0 -2px 0 var(--accent);
+  height: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
   pointer-events: none;
   z-index: 0;
   transition:
@@ -510,9 +534,23 @@ body {
   color: var(--muted);
   font: inherit;
   cursor: pointer;
-  padding: 11px;
-  border-radius: 12px;
-  transition: color 0.2s var(--ease);
+  padding: 12px;
+  border-radius: 999px;
+  transition:
+    color 0.2s var(--ease),
+    opacity 0.2s var(--ease);
+}
+
+/* Gradient Descent ships with a later engine update; until then its button is a
+   dimmed "coming soon" affordance (JS adds .is-soon when SIMS.descent is absent
+   and drops it once the sim registers, so the button then activates normally). */
+.seg__btn.is-soon {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.seg__btn.is-soon:hover {
+  color: var(--muted);
 }
 
 .seg__btn .ico {
@@ -952,6 +990,19 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   }
 }
 
+/* Entrance for the centered masthead — keeps the translateX(-50%) centering
+   while rising, so the group stays screen-centred throughout the animation. */
+@keyframes rise-center {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 12px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -969,6 +1020,33 @@ body.reduce-motion *::after {
   animation-duration: 0.001ms !important;
   animation-iteration-count: 1 !important;
   transition-duration: 0.001ms !important;
+}
+
+/* Below large-desktop widths the centered masthead would overlap the control
+   card, so it drops to its own full-width row beneath the chrome bar (the side
+   pills stay on the first row via flex-wrap + order). */
+@media (max-width: 1100px) {
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 14px;
+  }
+
+  .pill {
+    order: 1;
+  }
+
+  .disclosure {
+    order: 2;
+  }
+
+  .masthead {
+    order: 3;
+    position: static;
+    left: auto;
+    transform: none;
+    width: 100%;
+    animation: rise 0.6s var(--ease) both;
+  }
 }
 
 /* --- responsive: compact bottom-sheet panel on phones --------------------- */
@@ -994,16 +1072,21 @@ body.reduce-motion *::after {
     align-self: center;
   }
 
-  .panel__head {
-    padding: 20px 22px 14px;
+  .panel__body {
+    padding: 20px 22px 20px;
   }
 
-  .panel__body {
-    padding: 4px 22px 20px;
+  .masthead {
+    gap: 10px;
   }
 
   .wordmark {
-    font-size: 31px;
+    font-size: 20px;
+  }
+
+  /* Tighten the mode pills so all five fit a phone width without scrolling. */
+  .seg__btn {
+    padding: 10px;
   }
 
   .hint {

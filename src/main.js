@@ -166,6 +166,74 @@ const box = new THREE.LineSegments(
 box.position.y = ENV_BOUNDS; // rests on the grid (floor at y = 0)
 scene.add(box);
 
+// --- backdrop: gradient skydome + starfield + depth fog -------------------
+// Without this the open sims (gravity / pendulum / cloth) float in a black void.
+// All three layers are pure decoration: a large back-side sphere with a vertical
+// gradient, a faint star shell for parallax/place, and exponential fog that fades
+// distant bodies into the backdrop. The skydome is tinted per-sim in loadSim.
+renderer.setClearColor(0x070709, 1);
+
+const BG_TOP = new THREE.Color(0x15151d);
+const BG_BOTTOM = new THREE.Color(0x050507);
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  depthWrite: false,
+  uniforms: {
+    uTop: { value: BG_TOP.clone() },
+    uBottom: { value: BG_BOTTOM.clone() },
+  },
+  vertexShader: `
+    varying vec3 vDir;
+    void main() {
+      vDir = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vDir;
+    uniform vec3 uTop;
+    uniform vec3 uBottom;
+    void main() {
+      float t = clamp(normalize(vDir).y * 0.5 + 0.5, 0.0, 1.0);
+      gl_FragColor = vec4(mix(uBottom, uTop, pow(t, 0.9)), 1.0);
+    }
+  `,
+});
+const sky = new THREE.Mesh(new THREE.SphereGeometry(500, 32, 16), skyMat);
+sky.frustumCulled = false;
+scene.add(sky);
+
+scene.fog = new THREE.FogExp2(0x0a0a0f, 0.011);
+
+// Faint star shell surrounding the scene (drifts very slowly in the render loop).
+const STAR_COUNT = 1500;
+const starArr = new Float32Array(STAR_COUNT * 3);
+for (let i = 0; i < STAR_COUNT; i++) {
+  const r = 140 + Math.random() * 320; // a thick shell well behind the action
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1); // uniform on the sphere
+  const s = Math.sin(phi);
+  starArr[i * 3] = r * s * Math.cos(theta);
+  starArr[i * 3 + 1] = r * Math.cos(phi);
+  starArr[i * 3 + 2] = r * s * Math.sin(theta);
+}
+const starGeo = new THREE.BufferGeometry();
+starGeo.setAttribute('position', new THREE.BufferAttribute(starArr, 3));
+const stars = new THREE.Points(
+  starGeo,
+  new THREE.PointsMaterial({
+    color: 0xffffff,
+    size: 1.1,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
+    fog: false, // stars ARE the backdrop — don't let fog erase them
+  }),
+);
+stars.frustumCulled = false;
+scene.add(stars);
+
 // --- instanced spheres (unit sphere, scaled per instance) -----------------
 const sphereGeo = new THREE.SphereGeometry(1, 16, 12);
 const sphereMat = new THREE.MeshStandardMaterial({
@@ -348,6 +416,13 @@ function loadSim(nextKey) {
   // Restrained per-sim signature accent: drives slider fill, active tab, focus.
   document.documentElement.style.setProperty('--accent', cfg.accent || '#6ca0ff');
 
+  // Tie the backdrop to the sim identity: nudge the skydome gradient gently toward
+  // the accent (more at the top, a whisper at the bottom) so each sim has its own
+  // atmosphere without the environment ever shouting.
+  const acc = new THREE.Color(cfg.accent || 0x6ca0ff);
+  skyMat.uniforms.uTop.value.copy(BG_TOP).lerp(acc, 0.1);
+  skyMat.uniforms.uBottom.value.copy(BG_BOTTOM).lerp(acc, 0.03);
+
   grid.visible = cfg.showGrid;
   box.visible = cfg.boxed;
 
@@ -499,6 +574,17 @@ document.querySelector('.panel').addEventListener('input', (e) => {
 
 for (const b of segBtns) {
   b.addEventListener('click', () => loadSim(b.dataset.sim));
+}
+
+// Gradient Descent ships with a later engine update. Until SIMS.descent is
+// registered, present its mode button as a dimmed "coming soon" affordance
+// (loadSim already no-ops for unknown sims). Once the sim lands and registers,
+// this guard is skipped and the button activates through the normal loadSim path.
+const descentBtn = segBtns.find((b) => b.dataset.sim === 'descent');
+if (descentBtn && !SIMS.descent) {
+  descentBtn.classList.add('is-soon');
+  descentBtn.title = 'Gradient Descent — coming soon';
+  descentBtn.setAttribute('aria-disabled', 'true');
 }
 
 // Live label while dragging; rebuild only on release so we don't thrash.
@@ -864,6 +950,10 @@ function frame(now) {
       world.step(FIXED);
       acc -= FIXED;
     }
+  }
+  // Barely-perceptible parallax on the star shell (skipped under reduce-motion).
+  if (stars && !document.body.classList.contains('reduce-motion')) {
+    stars.rotation.y = now * 0.00001;
   }
   render();
 
