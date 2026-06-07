@@ -702,6 +702,247 @@ impl Simulation for DoublePendulum {
     }
 }
 
+/// Sim #3: a mass-spring cloth (soft body). A grid of point masses is linked by
+/// three families of distance constraints — structural (axis neighbours), shear
+/// (cell diagonals) and bend (2-apart) — that together resist stretch, shear and
+/// folding. Motion uses Verlet integration (velocity is implicit in the position
+/// history) with Jakobsen position-based constraint relaxation: a few iterations
+/// per step nudge each constrained pair back toward its rest length. The top edge
+/// (or just the two top corners) is pinned, and an oscillating wind pushes the
+/// sheet along +z so it billows.
+struct Cloth {
+    pos: Vec<f32>,        // current positions, len r*r*3
+    prev: Vec<f32>,       // previous positions (Verlet history), len r*r*3
+    pinned: Vec<bool>,    // per-particle pin flag, len r*r
+    edges_a: Vec<u32>,    // constraint endpoint A
+    edges_b: Vec<u32>,    // constraint endpoint B
+    edges_rest: Vec<f32>, // constraint rest length
+    r: usize,             // grid resolution (r x r particles)
+    g: f32,               // gravity
+    wind: f32,            // wind strength along +z
+    pin_mode: u32,        // 0 = two top corners, 1 = whole top edge
+    t: f32,               // elapsed time (drives the wind oscillation)
+}
+
+impl Cloth {
+    fn new(r: usize) -> Self {
+        let r = r.clamp(2, 200);
+        let size = 6.0f32;
+        let spacing = size / (r - 1) as f32;
+        let top_y = 3.0f32;
+        let mut pos = vec![0.0f32; r * r * 3];
+        // Lay the grid in the xy-plane: row 0 is the top, columns run left->right,
+        // centred on x = 0 and hanging down from top_y.
+        for row in 0..r {
+            for col in 0..r {
+                let k = (row * r + col) * 3;
+                pos[k] = -size * 0.5 + col as f32 * spacing;
+                pos[k + 1] = top_y - row as f32 * spacing;
+                pos[k + 2] = 0.0;
+            }
+        }
+        let prev = pos.clone();
+        let pinned = vec![false; r * r];
+        let mut s = Self {
+            pos,
+            prev,
+            pinned,
+            edges_a: Vec::new(),
+            edges_b: Vec::new(),
+            edges_rest: Vec::new(),
+            r,
+            g: 9.81,
+            wind: 6.0,
+            pin_mode: 0,
+            t: 0.0,
+        };
+        s.build_edges();
+        s.apply_pins();
+        s
+    }
+
+    #[inline]
+    fn idx(&self, row: usize, col: usize) -> usize {
+        row * self.r + col
+    }
+
+    /// Record one distance constraint, capturing the current separation as its
+    /// rest length (the grid starts unstretched).
+    fn add_edge(&mut self, a: usize, b: usize) {
+        let ka = a * 3;
+        let kb = b * 3;
+        let dx = self.pos[ka] - self.pos[kb];
+        let dy = self.pos[ka + 1] - self.pos[kb + 1];
+        let dz = self.pos[ka + 2] - self.pos[kb + 2];
+        let rest = (dx * dx + dy * dy + dz * dz).sqrt();
+        self.edges_a.push(a as u32);
+        self.edges_b.push(b as u32);
+        self.edges_rest.push(rest);
+    }
+
+    /// Build structural (axis neighbours), shear (cell diagonals) and bend
+    /// (skip-one neighbours) constraints over the grid.
+    fn build_edges(&mut self) {
+        let r = self.r;
+        for row in 0..r {
+            for col in 0..r {
+                let i = self.idx(row, col);
+                // Structural: right and down neighbours.
+                if col + 1 < r {
+                    let j = self.idx(row, col + 1);
+                    self.add_edge(i, j);
+                }
+                if row + 1 < r {
+                    let j = self.idx(row + 1, col);
+                    self.add_edge(i, j);
+                }
+                // Shear: both diagonals of the cell to the lower-right.
+                if col + 1 < r && row + 1 < r {
+                    let br = self.idx(row + 1, col + 1);
+                    self.add_edge(i, br);
+                    let tr = self.idx(row, col + 1);
+                    let bl = self.idx(row + 1, col);
+                    self.add_edge(tr, bl);
+                }
+                // Bend: skip-one neighbours stiffen the sheet against folding.
+                if col + 2 < r {
+                    let j = self.idx(row, col + 2);
+                    self.add_edge(i, j);
+                }
+                if row + 2 < r {
+                    let j = self.idx(row + 2, col);
+                    self.add_edge(i, j);
+                }
+            }
+        }
+    }
+
+    /// Recompute which particles are pinned from the current `pin_mode`. Row 0 is
+    /// the top, so its flat indices are simply `0..r`.
+    fn apply_pins(&mut self) {
+        for p in self.pinned.iter_mut() {
+            *p = false;
+        }
+        let r = self.r;
+        if self.pin_mode == 1 {
+            for col in 0..r {
+                self.pinned[col] = true; // whole top edge
+            }
+        } else {
+            self.pinned[0] = true; // top-left corner
+            self.pinned[r - 1] = true; // top-right corner
+        }
+    }
+}
+
+impl Simulation for Cloth {
+    fn step(&mut self, dt: f32) {
+        self.t += dt;
+        let damping = 0.99f32;
+        let g = self.g;
+        let n = self.r * self.r;
+        let dt2 = dt * dt;
+        // Wind gusts along +z: a global oscillation, modulated per-particle by x
+        // and time so the sheet ripples instead of translating rigidly.
+        let wind_base = self.wind * (0.6 + 0.4 * (self.t * 1.7).sin());
+
+        // 1) Verlet integrate every free particle:
+        //    x' = x + (x - x_prev)*damping + a*dt^2.  prev <- x.
+        for i in 0..n {
+            if self.pinned[i] {
+                continue;
+            }
+            let k = i * 3;
+            let px = self.pos[k];
+            let py = self.pos[k + 1];
+            let pz = self.pos[k + 2];
+            let az = wind_base * (0.7 + 0.3 * (px * 1.3 + self.t * 2.0).sin());
+            let vx = (px - self.prev[k]) * damping;
+            let vy = (py - self.prev[k + 1]) * damping;
+            let vz = (pz - self.prev[k + 2]) * damping;
+            self.pos[k] = px + vx;
+            self.pos[k + 1] = py + vy - g * dt2;
+            self.pos[k + 2] = pz + vz + az * dt2;
+            self.prev[k] = px;
+            self.prev[k + 1] = py;
+            self.prev[k + 2] = pz;
+        }
+
+        // 2) Jakobsen constraint relaxation: pull each pair back toward its rest
+        //    length over a few iterations (approximates a stiff solve). A pinned
+        //    end has infinite mass; with one pinned end the free end takes the
+        //    whole correction, otherwise the pair splits it evenly.
+        let iters = 5;
+        let ne = self.edges_a.len();
+        for _ in 0..iters {
+            for e in 0..ne {
+                let a = self.edges_a[e] as usize;
+                let b = self.edges_b[e] as usize;
+                let pa = self.pinned[a];
+                let pb = self.pinned[b];
+                if pa && pb {
+                    continue;
+                }
+                let rest = self.edges_rest[e];
+                let ka = a * 3;
+                let kb = b * 3;
+                let dx = self.pos[kb] - self.pos[ka];
+                let dy = self.pos[kb + 1] - self.pos[ka + 1];
+                let dz = self.pos[kb + 2] - self.pos[ka + 2];
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 <= 1e-12 {
+                    continue;
+                }
+                let d = d2.sqrt();
+                let diff = (d - rest) / d; // signed fractional stretch
+                if pa {
+                    self.pos[kb] -= dx * diff;
+                    self.pos[kb + 1] -= dy * diff;
+                    self.pos[kb + 2] -= dz * diff;
+                } else if pb {
+                    self.pos[ka] += dx * diff;
+                    self.pos[ka + 1] += dy * diff;
+                    self.pos[ka + 2] += dz * diff;
+                } else {
+                    let h = 0.5 * diff;
+                    self.pos[ka] += dx * h;
+                    self.pos[ka + 1] += dy * h;
+                    self.pos[ka + 2] += dz * h;
+                    self.pos[kb] -= dx * h;
+                    self.pos[kb + 1] -= dy * h;
+                    self.pos[kb + 2] -= dz * h;
+                }
+            }
+        }
+    }
+    fn positions(&self) -> &[f32] {
+        &self.pos
+    }
+    fn reset(&mut self) {
+        *self = Cloth::new(self.r);
+    }
+    fn count(&self) -> usize {
+        self.r * self.r
+    }
+    fn radius(&self) -> f32 {
+        0.05
+    }
+    fn bounds(&self) -> f32 {
+        6.0
+    }
+    fn set_param(&mut self, id: u32, v: f32) {
+        match id {
+            0 => self.g = v.max(0.0),  // gravity
+            1 => self.wind = v.max(0.0), // wind strength
+            2 => {
+                self.pin_mode = if v >= 0.5 { 1 } else { 0 };
+                self.apply_pins();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The single concrete type that crosses the wasm-bindgen boundary. It owns a
 /// trait object so JS only ever talks to `World`, while Rust swaps the sim behind it.
 #[wasm_bindgen]
@@ -715,9 +956,9 @@ impl World {
     pub fn new(kind: u32, n: usize) -> World {
         console_error_panic_hook::set_once();
         let sim: Box<dyn Simulation> = match kind {
-            // Phase 4 will add: 3 => Cloth
             1 => Box::new(NBody::new(n)),
             2 => Box::new(DoublePendulum::new(n)),
+            3 => Box::new(Cloth::new(n)),
             _ => Box::new(Bouncer::new(n)),
         };
         World { sim }
