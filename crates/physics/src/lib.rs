@@ -25,8 +25,23 @@ pub trait Simulation {
     fn extra(&self) -> &[f32] {
         &[]
     }
+    /// Optional flat `[vx, vy, vz, ...]` velocity buffer (3 per body), used by JS
+    /// to draw velocity arrows. Empty when the sim has no cartesian velocities
+    /// (e.g. the angle-driven pendulum or the optimizer-driven walkers).
+    fn velocities(&self) -> &[f32] {
+        &[]
+    }
     /// Tunable parameter hook; the meaning of `id` is per-sim (e.g. 0 = G).
     fn set_param(&mut self, _id: u32, _v: f32) {}
+    /// Optional scalar field sampled on a square grid (row-major), used by the
+    /// gradient-descent sim to paint a loss-landscape heatmap. Empty otherwise.
+    fn grid(&self) -> &[f32] {
+        &[]
+    }
+    /// Raw (min, max) of the `grid` field, so JS can normalize the heatmap.
+    fn loss_range(&self) -> (f32, f32) {
+        (0.0, 1.0)
+    }
 }
 
 /// Tiny deterministic LCG so the scene looks the same every load without an rng crate.
@@ -343,6 +358,9 @@ impl Simulation for Bouncer {
     fn extra(&self) -> &[f32] {
         &self.speed
     }
+    fn velocities(&self) -> &[f32] {
+        &self.vel
+    }
     fn set_param(&mut self, id: u32, v: f32) {
         if id == 0 {
             // v is a gravity multiplier (1.0 = Earth gravity, 0 = weightless).
@@ -529,6 +547,9 @@ impl Simulation for NBody {
     }
     fn extra(&self) -> &[f32] {
         &self.speed
+    }
+    fn velocities(&self) -> &[f32] {
+        &self.vel
     }
     fn set_param(&mut self, id: u32, v: f32) {
         if id == 0 {
@@ -943,6 +964,632 @@ impl Simulation for Cloth {
     }
 }
 
+/// Resolution of the heatmap grid (GRID_N x GRID_N samples of the loss field).
+const GRID_N: usize = 128;
+/// World half-extent the loss-landscape domain is mapped onto (the contour plane
+/// spans [-WORLD_HALF, WORLD_HALF] on both axes regardless of the math domain).
+const WORLD_HALF: f32 = 5.0;
+
+/// A 2D loss landscape with an analytic value and gradient. These are the
+/// classic optimizer test functions; each carries a square viewing window
+/// (`domain`) chosen to frame its interesting structure and minima.
+#[derive(Clone, Copy)]
+enum Landscape {
+    Bowl,       // x^2 + y^2                     — convex, min at origin
+    Saddle,     // x^2 - y^2                      — a saddle, no minimum
+    Rosenbrock, // (1-x)^2 + 100(y-x^2)^2         — banana valley, min at (1,1)
+    Himmelblau, // (x^2+y-11)^2 + (x+y^2-7)^2     — four equal minima
+    Rastrigin,  // 20 + Σ(xi^2 - 10cos(2π xi))    — many local minima, global at origin
+}
+
+impl Landscape {
+    fn from_u32(v: u32) -> Self {
+        match v {
+            1 => Landscape::Saddle,
+            2 => Landscape::Rosenbrock,
+            3 => Landscape::Himmelblau,
+            4 => Landscape::Rastrigin,
+            _ => Landscape::Bowl,
+        }
+    }
+
+    fn f(&self, x: f32, y: f32) -> f32 {
+        match self {
+            Landscape::Bowl => x * x + y * y,
+            Landscape::Saddle => x * x - y * y,
+            Landscape::Rosenbrock => {
+                let a = 1.0 - x;
+                let b = y - x * x;
+                a * a + 100.0 * b * b
+            }
+            Landscape::Himmelblau => {
+                let a = x * x + y - 11.0;
+                let b = x + y * y - 7.0;
+                a * a + b * b
+            }
+            Landscape::Rastrigin => {
+                let pi2 = 2.0 * std::f32::consts::PI;
+                20.0 + (x * x - 10.0 * (pi2 * x).cos()) + (y * y - 10.0 * (pi2 * y).cos())
+            }
+        }
+    }
+
+    /// Exact gradient (∂f/∂x, ∂f/∂y) — no finite differences, so even stiff
+    /// landscapes step cleanly.
+    fn grad(&self, x: f32, y: f32) -> (f32, f32) {
+        match self {
+            Landscape::Bowl => (2.0 * x, 2.0 * y),
+            Landscape::Saddle => (2.0 * x, -2.0 * y),
+            Landscape::Rosenbrock => {
+                let dx = -2.0 * (1.0 - x) - 400.0 * x * (y - x * x);
+                let dy = 200.0 * (y - x * x);
+                (dx, dy)
+            }
+            Landscape::Himmelblau => {
+                let a = x * x + y - 11.0;
+                let b = x + y * y - 7.0;
+                let dx = 4.0 * x * a + 2.0 * b;
+                let dy = 2.0 * a + 4.0 * y * b;
+                (dx, dy)
+            }
+            Landscape::Rastrigin => {
+                let pi2 = 2.0 * std::f32::consts::PI;
+                let dx = 2.0 * x + 10.0 * pi2 * (pi2 * x).sin();
+                let dy = 2.0 * y + 10.0 * pi2 * (pi2 * y).sin();
+                (dx, dy)
+            }
+        }
+    }
+
+    /// (center_x, center_y, half) — the square window in math-space that the
+    /// contour is sampled over and that walkers are clamped into.
+    fn domain(&self) -> (f32, f32, f32) {
+        match self {
+            Landscape::Bowl => (0.0, 0.0, 3.0),
+            Landscape::Saddle => (0.0, 0.0, 3.0),
+            Landscape::Rosenbrock => (0.0, 1.0, 2.5),
+            Landscape::Himmelblau => (0.0, 0.0, 5.0),
+            Landscape::Rastrigin => (0.0, 0.0, 5.12),
+        }
+    }
+}
+
+/// A first-order optimizer. SGD/Momentum/RMSProp/Adam share the per-walker
+/// moment accumulators on `GradientDescent`; the unused ones just stay zero.
+#[derive(Clone, Copy)]
+enum Opt {
+    Sgd,
+    Momentum,
+    RmsProp,
+    Adam,
+}
+
+impl Opt {
+    fn from_u32(v: u32) -> Self {
+        match v {
+            0 => Opt::Sgd,
+            1 => Opt::Momentum,
+            2 => Opt::RmsProp,
+            _ => Opt::Adam,
+        }
+    }
+}
+
+/// Sim #4: gradient-descent optimizer race over a 2D loss landscape. A swarm of
+/// "walkers" each run the same optimizer from different starts and descend the
+/// surface; the surface itself is sampled into a `GRID_N x GRID_N` heatmap that
+/// JS paints as a top-down contour. Positions are emitted in world space (the
+/// math domain is mapped onto the XZ-plane at y=0) so the renderer stays generic.
+struct GradientDescent {
+    wx: Vec<f32>,  // walker x in math-space, len k
+    wy: Vec<f32>,  // walker y in math-space, len k
+    m_x: Vec<f32>, // 1st moment / momentum accumulator, len k
+    m_y: Vec<f32>,
+    v_x: Vec<f32>, // 2nd moment accumulator (RMSProp/Adam), len k
+    v_y: Vec<f32>,
+    t_step: u32,        // global step counter, drives Adam bias correction
+    pos: Vec<f32>,      // world positions [x,0,z, ...], len k*3 (zero-copy to JS)
+    loss: Vec<f32>,     // per-walker f value, len k (exposed via extra())
+    grid_buf: Vec<f32>, // GRID_N*GRID_N samples of f, row-major (y outer, x inner)
+    loss_min: f32,      // raw min over the grid (heatmap normalization)
+    loss_max: f32,      // raw max over the grid
+    k: usize,           // walker count
+    landscape: Landscape,
+    opt: Opt,
+    lr: f32,   // learning rate
+    beta: f32, // momentum coefficient / Adam beta1
+    seed: u32, // RNG seed — identical across optimizers for a fair race
+}
+
+impl GradientDescent {
+    fn new(n: usize) -> Self {
+        let k = n.clamp(1, 4096);
+        let mut s = Self {
+            wx: vec![0.0; k],
+            wy: vec![0.0; k],
+            m_x: vec![0.0; k],
+            m_y: vec![0.0; k],
+            v_x: vec![0.0; k],
+            v_y: vec![0.0; k],
+            t_step: 0,
+            pos: vec![0.0; k * 3],
+            loss: vec![0.0; k],
+            grid_buf: vec![0.0; GRID_N * GRID_N],
+            loss_min: 0.0,
+            loss_max: 1.0,
+            k,
+            landscape: Landscape::Bowl,
+            opt: Opt::Adam,
+            lr: 0.05,
+            beta: 0.9,
+            seed: 0x9e37_79b9,
+        };
+        s.rebuild_grid();
+        s.seed();
+        s
+    }
+
+    /// Map a math-space point into world space. The domain is centred on the
+    /// world origin and scaled to ±WORLD_HALF, so a single `half` keeps the
+    /// mapping square (no aspect distortion) and walkers land on the contour.
+    #[inline]
+    fn to_world(&self, x: f32, y: f32) -> (f32, f32, f32) {
+        let (cx, cz, half) = self.landscape.domain();
+        let wx = (x - cx) / half * WORLD_HALF;
+        let wz = (y - cz) / half * WORLD_HALF;
+        (wx, 0.0, wz)
+    }
+
+    /// Refill `pos` (world) and `loss` from the current walker coordinates.
+    fn sync_outputs(&mut self) {
+        for i in 0..self.k {
+            let (wx, wy, wz) = self.to_world(self.wx[i], self.wy[i]);
+            let k = i * 3;
+            self.pos[k] = wx;
+            self.pos[k + 1] = wy;
+            self.pos[k + 2] = wz;
+            self.loss[i] = self.landscape.f(self.wx[i], self.wy[i]);
+        }
+    }
+
+    /// Re-sample the loss field over the current landscape's domain and cache its
+    /// raw range. Only called on construction and landscape change (not per step).
+    fn rebuild_grid(&mut self) {
+        let (cx, cz, half) = self.landscape.domain();
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        let span = 2.0 * half;
+        for j in 0..GRID_N {
+            let ty = j as f32 / (GRID_N - 1) as f32;
+            let y = cz - half + ty * span;
+            for i in 0..GRID_N {
+                let tx = i as f32 / (GRID_N - 1) as f32;
+                let x = cx - half + tx * span;
+                let f = self.landscape.f(x, y);
+                self.grid_buf[j * GRID_N + i] = f;
+                if f < lo {
+                    lo = f;
+                }
+                if f > hi {
+                    hi = f;
+                }
+            }
+        }
+        self.loss_min = lo;
+        self.loss_max = hi;
+    }
+
+    /// Spread walkers deterministically across ~80% of the domain, zero the
+    /// optimizer accumulators and reset the step counter. The same seed is used
+    /// every time so switching optimizers compares them from identical starts.
+    fn seed(&mut self) {
+        let (cx, cz, half) = self.landscape.domain();
+        let spread = half * 0.8;
+        let mut rng = Rng::new(self.seed);
+        for i in 0..self.k {
+            self.wx[i] = cx + rng.range(-spread, spread);
+            self.wy[i] = cz + rng.range(-spread, spread);
+            self.m_x[i] = 0.0;
+            self.m_y[i] = 0.0;
+            self.v_x[i] = 0.0;
+            self.v_y[i] = 0.0;
+        }
+        self.t_step = 0;
+        self.sync_outputs();
+    }
+}
+
+impl Simulation for GradientDescent {
+    fn step(&mut self, _dt: f32) {
+        // One optimizer iteration per frame (gradient descent is step-indexed,
+        // not time-indexed, so dt is ignored).
+        self.t_step += 1;
+        let t = self.t_step as f32;
+        let beta1 = self.beta;
+        let beta2 = 0.999f32;
+        let eps = 1e-8f32;
+        let lr = self.lr;
+        // Bias-correction denominators (Adam): hoisted out of the walker loop.
+        let bc1 = 1.0 - beta1.powf(t);
+        let bc2 = 1.0 - beta2.powf(t);
+        let (cx, cz, half) = self.landscape.domain();
+        let (lo_x, hi_x) = (cx - half, cx + half);
+        let (lo_y, hi_y) = (cz - half, cz + half);
+        // Gradient clipping: without it the stiff landscapes (Rosenbrock,
+        // Rastrigin) explode to NaN within a few steps at lr 0.05.
+        let clip = 1.0e3f32;
+        for i in 0..self.k {
+            let (mut gx, mut gy) = self.landscape.grad(self.wx[i], self.wy[i]);
+            let gn = (gx * gx + gy * gy).sqrt();
+            if gn > clip {
+                let s = clip / gn;
+                gx *= s;
+                gy *= s;
+            }
+            match self.opt {
+                Opt::Sgd => {
+                    self.wx[i] -= lr * gx;
+                    self.wy[i] -= lr * gy;
+                }
+                Opt::Momentum => {
+                    self.m_x[i] = beta1 * self.m_x[i] + gx;
+                    self.m_y[i] = beta1 * self.m_y[i] + gy;
+                    self.wx[i] -= lr * self.m_x[i];
+                    self.wy[i] -= lr * self.m_y[i];
+                }
+                Opt::RmsProp => {
+                    self.v_x[i] = beta2 * self.v_x[i] + (1.0 - beta2) * gx * gx;
+                    self.v_y[i] = beta2 * self.v_y[i] + (1.0 - beta2) * gy * gy;
+                    self.wx[i] -= lr * gx / (self.v_x[i].sqrt() + eps);
+                    self.wy[i] -= lr * gy / (self.v_y[i].sqrt() + eps);
+                }
+                Opt::Adam => {
+                    self.m_x[i] = beta1 * self.m_x[i] + (1.0 - beta1) * gx;
+                    self.m_y[i] = beta1 * self.m_y[i] + (1.0 - beta1) * gy;
+                    self.v_x[i] = beta2 * self.v_x[i] + (1.0 - beta2) * gx * gx;
+                    self.v_y[i] = beta2 * self.v_y[i] + (1.0 - beta2) * gy * gy;
+                    let mhx = self.m_x[i] / bc1;
+                    let mhy = self.m_y[i] / bc1;
+                    let vhx = self.v_x[i] / bc2;
+                    let vhy = self.v_y[i] / bc2;
+                    self.wx[i] -= lr * mhx / (vhx.sqrt() + eps);
+                    self.wy[i] -= lr * mhy / (vhy.sqrt() + eps);
+                }
+            }
+            // Keep walkers on the sampled plane (also a final NaN backstop).
+            self.wx[i] = self.wx[i].clamp(lo_x, hi_x);
+            self.wy[i] = self.wy[i].clamp(lo_y, hi_y);
+        }
+        self.sync_outputs();
+    }
+    fn positions(&self) -> &[f32] {
+        &self.pos
+    }
+    fn reset(&mut self) {
+        // Deliberately unlike the other sims: re-seed walkers and zero the
+        // accumulators but PRESERVE the user's landscape/optimizer/lr/beta. A
+        // fresh new() would snap the UI selections back to Bowl/Adam/0.05.
+        self.seed();
+    }
+    fn count(&self) -> usize {
+        self.k
+    }
+    fn radius(&self) -> f32 {
+        0.08
+    }
+    fn bounds(&self) -> f32 {
+        WORLD_HALF
+    }
+    fn extra(&self) -> &[f32] {
+        &self.loss
+    }
+    fn grid(&self) -> &[f32] {
+        &self.grid_buf
+    }
+    fn loss_range(&self) -> (f32, f32) {
+        (self.loss_min, self.loss_max)
+    }
+    fn set_param(&mut self, id: u32, v: f32) {
+        match id {
+            0 => self.lr = v.max(0.0), // learning rate
+            1 => {
+                self.landscape = Landscape::from_u32(v as u32);
+                self.rebuild_grid();
+                self.seed();
+            }
+            2 => {
+                self.opt = Opt::from_u32(v as u32);
+                self.seed(); // fair restart from identical positions
+            }
+            3 => self.beta = v.clamp(0.0, 0.999), // momentum / Adam beta1
+            _ => {}
+        }
+    }
+}
+
+/// Reynolds steering: turn a boid's velocity toward a `desired` direction. Returns
+/// the acceleration that nudges the current velocity `v` toward a velocity of
+/// magnitude `max_speed` pointing along `d`, capped at `max_force`. A zero-length
+/// `d` yields no steer (the rule had no opinion this frame).
+#[inline]
+fn steer_toward(
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    vx: f32,
+    vy: f32,
+    vz: f32,
+    max_speed: f32,
+    max_force: f32,
+) -> (f32, f32, f32) {
+    let dn = (dx * dx + dy * dy + dz * dz).sqrt();
+    if dn < 1e-6 {
+        return (0.0, 0.0, 0.0);
+    }
+    let s = max_speed / dn;
+    // desired velocity (along d, at cruise speed) minus current velocity
+    let mut fx = dx * s - vx;
+    let mut fy = dy * s - vy;
+    let mut fz = dz * s - vz;
+    let fmag = (fx * fx + fy * fy + fz * fz).sqrt();
+    if fmag > max_force {
+        let t = max_force / fmag;
+        fx *= t;
+        fy *= t;
+        fz *= t;
+    }
+    (fx, fy, fz)
+}
+
+/// Sim #5: Reynolds boids (flocking). Each boid steers by three local rules over a
+/// perception radius — separation (avoid crowding), alignment (match neighbours'
+/// heading) and cohesion (steer toward the local centre of mass) — and the flock
+/// emerges with no global control. Neighbour search is the naive O(n^2) (ample for
+/// a few hundred boids); steering is accumulated into a reused `acc` buffer so a
+/// step makes no heap allocation. Boids roam a 3D box and ease back from the walls
+/// via a soft boundary spring so the flock stays in frame.
+struct Boids {
+    pos: Vec<f32>,
+    vel: Vec<f32>,
+    acc: Vec<f32>,   // steering accel for the current step (reused, no per-step alloc)
+    speed: Vec<f32>, // per-boid |v|, exposed via extra() for color
+    n: usize,
+    bounds: f32,
+    radius: f32,
+    perception: f32, // neighbour radius for alignment + cohesion
+    sep_radius: f32, // separation only kicks in closer than this
+    max_speed: f32,
+    min_speed: f32, // boids cruise — never stall to a stop
+    max_force: f32, // per-rule steering cap
+    sep_w: f32,
+    ali_w: f32,
+    coh_w: f32,
+    seed_val: u32,
+}
+
+impl Boids {
+    fn new(n: usize) -> Self {
+        let n = n.clamp(1, 4096);
+        let mut s = Self {
+            pos: vec![0.0; n * 3],
+            vel: vec![0.0; n * 3],
+            acc: vec![0.0; n * 3],
+            speed: vec![0.0; n],
+            n,
+            bounds: 7.0,
+            radius: 0.11,
+            perception: 3.0,
+            sep_radius: 1.2,
+            max_speed: 4.0,
+            min_speed: 1.8,
+            max_force: 6.0,
+            sep_w: 1.5,
+            ali_w: 1.2,
+            coh_w: 1.0,
+            seed_val: 0x515F_00D5,
+        };
+        s.seed();
+        s
+    }
+
+    /// Deterministically scatter boids through the inner box with random headings,
+    /// all at the same cruising speed, and clear the steering accumulator.
+    fn seed(&mut self) {
+        let b = self.bounds * 0.6;
+        let mut rng = Rng::new(self.seed_val);
+        let tau = std::f32::consts::TAU;
+        let sp = self.max_speed * 0.75;
+        for i in 0..self.n {
+            let k = i * 3;
+            self.pos[k] = rng.range(-b, b);
+            self.pos[k + 1] = rng.range(-b, b);
+            self.pos[k + 2] = rng.range(-b, b);
+            // Uniform-ish direction on the sphere (phi = acos of a uniform cosine).
+            let theta = rng.range(0.0, tau);
+            let phi = rng.range(-1.0, 1.0).acos();
+            self.vel[k] = sp * phi.sin() * theta.cos();
+            self.vel[k + 1] = sp * phi.cos();
+            self.vel[k + 2] = sp * phi.sin() * theta.sin();
+            self.speed[i] = sp;
+        }
+        for a in self.acc.iter_mut() {
+            *a = 0.0;
+        }
+    }
+}
+
+impl Simulation for Boids {
+    fn step(&mut self, dt: f32) {
+        let n = self.n;
+        let per2 = self.perception * self.perception;
+        let sep2 = self.sep_radius * self.sep_radius;
+        let max_speed = self.max_speed;
+        let max_force = self.max_force;
+
+        // Pass 1: read current pos/vel, accumulate each boid's steering into acc.
+        // (Synchronous update — every boid sees the same snapshot, so flock motion
+        // doesn't depend on iteration order.)
+        for i in 0..n {
+            let ki = i * 3;
+            let xi = self.pos[ki];
+            let yi = self.pos[ki + 1];
+            let zi = self.pos[ki + 2];
+            let vxi = self.vel[ki];
+            let vyi = self.vel[ki + 1];
+            let vzi = self.vel[ki + 2];
+
+            let (mut sx, mut sy, mut sz) = (0.0f32, 0.0f32, 0.0f32); // separation dir
+            let (mut avx, mut avy, mut avz) = (0.0f32, 0.0f32, 0.0f32); // summed neighbour vel
+            let (mut cx, mut cy, mut cz) = (0.0f32, 0.0f32, 0.0f32); // summed neighbour pos
+            let mut n_flock = 0u32;
+
+            for j in 0..n {
+                if j == i {
+                    continue;
+                }
+                let kj = j * 3;
+                let dx = xi - self.pos[kj];
+                let dy = yi - self.pos[kj + 1];
+                let dz = zi - self.pos[kj + 2];
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 < per2 {
+                    avx += self.vel[kj];
+                    avy += self.vel[kj + 1];
+                    avz += self.vel[kj + 2];
+                    cx += self.pos[kj];
+                    cy += self.pos[kj + 1];
+                    cz += self.pos[kj + 2];
+                    n_flock += 1;
+                    if d2 < sep2 && d2 > 1e-6 {
+                        // Push away, weighted by 1/d so the nearest boids dominate.
+                        let w = 1.0 / d2; // = (1/d) * (1/d): direction scaled by 1/d
+                        sx += dx * w;
+                        sy += dy * w;
+                        sz += dz * w;
+                    }
+                }
+            }
+
+            let (mut fx, mut fy, mut fz) = (0.0f32, 0.0f32, 0.0f32);
+            if n_flock > 0 {
+                let inv = 1.0 / n_flock as f32;
+                // Alignment: match the average heading of neighbours.
+                let (ax, ay, az) =
+                    steer_toward(avx * inv, avy * inv, avz * inv, vxi, vyi, vzi, max_speed, max_force);
+                fx += self.ali_w * ax;
+                fy += self.ali_w * ay;
+                fz += self.ali_w * az;
+                // Cohesion: steer toward the neighbours' centre of mass.
+                let (gx, gy, gz) = steer_toward(
+                    cx * inv - xi,
+                    cy * inv - yi,
+                    cz * inv - zi,
+                    vxi,
+                    vyi,
+                    vzi,
+                    max_speed,
+                    max_force,
+                );
+                fx += self.coh_w * gx;
+                fy += self.coh_w * gy;
+                fz += self.coh_w * gz;
+            }
+            // Separation: steer directly away from crowding neighbours.
+            let (rx, ry, rz) = steer_toward(sx, sy, sz, vxi, vyi, vzi, max_speed, max_force);
+            fx += self.sep_w * rx;
+            fy += self.sep_w * ry;
+            fz += self.sep_w * rz;
+
+            self.acc[ki] = fx;
+            self.acc[ki + 1] = fy;
+            self.acc[ki + 2] = fz;
+        }
+
+        // Pass 2: integrate — apply steering, turn back from the walls, clamp speed,
+        // advance. A soft boundary spring (engaged past `margin`) turns boids around
+        // before they reach the box; the hard clamp is a backstop / NaN guard only.
+        let margin = self.bounds * 0.75;
+        let wall_k = self.max_force * 2.0;
+        let min_speed = self.min_speed;
+        let b = self.bounds;
+        for i in 0..n {
+            let k = i * 3;
+            let mut vx = self.vel[k] + self.acc[k] * dt;
+            let mut vy = self.vel[k + 1] + self.acc[k + 1] * dt;
+            let mut vz = self.vel[k + 2] + self.acc[k + 2] * dt;
+
+            if self.pos[k] > margin {
+                vx -= wall_k * (self.pos[k] - margin) * dt;
+            } else if self.pos[k] < -margin {
+                vx += wall_k * (-margin - self.pos[k]) * dt;
+            }
+            if self.pos[k + 1] > margin {
+                vy -= wall_k * (self.pos[k + 1] - margin) * dt;
+            } else if self.pos[k + 1] < -margin {
+                vy += wall_k * (-margin - self.pos[k + 1]) * dt;
+            }
+            if self.pos[k + 2] > margin {
+                vz -= wall_k * (self.pos[k + 2] - margin) * dt;
+            } else if self.pos[k + 2] < -margin {
+                vz += wall_k * (-margin - self.pos[k + 2]) * dt;
+            }
+
+            // Keep boids cruising within [min_speed, max_speed].
+            let sp = (vx * vx + vy * vy + vz * vz).sqrt();
+            if sp > 1e-6 {
+                let target = sp.clamp(min_speed, max_speed);
+                let t = target / sp;
+                vx *= t;
+                vy *= t;
+                vz *= t;
+                self.speed[i] = target;
+            } else {
+                self.speed[i] = 0.0;
+            }
+
+            self.vel[k] = vx;
+            self.vel[k + 1] = vy;
+            self.vel[k + 2] = vz;
+            self.pos[k] = (self.pos[k] + vx * dt).clamp(-b, b);
+            self.pos[k + 1] = (self.pos[k + 1] + vy * dt).clamp(-b, b);
+            self.pos[k + 2] = (self.pos[k + 2] + vz * dt).clamp(-b, b);
+        }
+    }
+    fn positions(&self) -> &[f32] {
+        &self.pos
+    }
+    fn reset(&mut self) {
+        // Re-seed positions/headings but PRESERVE the user's rule weights (which are
+        // bound to a UI slider), so a reset re-scatters the flock without snapping
+        // the controls back to defaults.
+        self.seed();
+    }
+    fn count(&self) -> usize {
+        self.n
+    }
+    fn radius(&self) -> f32 {
+        self.radius
+    }
+    fn bounds(&self) -> f32 {
+        self.bounds
+    }
+    fn extra(&self) -> &[f32] {
+        &self.speed
+    }
+    fn velocities(&self) -> &[f32] {
+        &self.vel
+    }
+    fn set_param(&mut self, id: u32, v: f32) {
+        match id {
+            0 => self.coh_w = v.max(0.0),          // cohesion (UI slider)
+            1 => self.ali_w = v.max(0.0),          // alignment
+            2 => self.sep_w = v.max(0.0),          // separation
+            3 => self.perception = v.clamp(0.3, 6.0),
+            _ => {}
+        }
+    }
+}
+
 /// The single concrete type that crosses the wasm-bindgen boundary. It owns a
 /// trait object so JS only ever talks to `World`, while Rust swaps the sim behind it.
 #[wasm_bindgen]
@@ -959,6 +1606,8 @@ impl World {
             1 => Box::new(NBody::new(n)),
             2 => Box::new(DoublePendulum::new(n)),
             3 => Box::new(Cloth::new(n)),
+            4 => Box::new(GradientDescent::new(n)),
+            5 => Box::new(Boids::new(n)),
             _ => Box::new(Bouncer::new(n)),
         };
         World { sim }
@@ -1020,8 +1669,53 @@ impl World {
         self.sim.extra().len()
     }
 
+    /// Pointer to the flat velocity buffer (for drawing velocity arrows in JS).
+    pub fn vel_ptr(&self) -> *const f32 {
+        self.sim.velocities().as_ptr()
+    }
+
+    /// Length of the velocity buffer (0 when the active sim exposes none).
+    pub fn vel_len(&self) -> usize {
+        self.sim.velocities().len()
+    }
+
     /// Set a tunable parameter on the active sim (id is sim-specific; 0 = G).
     pub fn set_param(&mut self, id: u32, v: f32) {
         self.sim.set_param(id, v);
+    }
+
+    /// Pointer to the loss-landscape heatmap field (gradient-descent sim only).
+    pub fn grid_ptr(&self) -> *const f32 {
+        self.sim.grid().as_ptr()
+    }
+
+    /// Number of f32 samples in the heatmap (0 when the sim exposes none).
+    pub fn grid_len(&self) -> usize {
+        self.sim.grid().len()
+    }
+
+    /// Side length of the (square) heatmap grid, i.e. sqrt(grid_len); 0 if none.
+    pub fn grid_dim(&self) -> usize {
+        let n = self.sim.grid().len();
+        if n == 0 {
+            0
+        } else {
+            (n as f64).sqrt() as usize
+        }
+    }
+
+    /// World half-extent the contour plane spans on each axis (sizes the plane).
+    pub fn domain_extent(&self) -> f32 {
+        WORLD_HALF
+    }
+
+    /// Raw minimum of the loss field (for heatmap / color normalization).
+    pub fn loss_min(&self) -> f32 {
+        self.sim.loss_range().0
+    }
+
+    /// Raw maximum of the loss field.
+    pub fn loss_max(&self) -> f32 {
+        self.sim.loss_range().1
     }
 }

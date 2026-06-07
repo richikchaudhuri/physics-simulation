@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { initWasm, World, makePositions, makeExtra } from './wasm.js';
+import { initWasm, World, makePositions, makeExtra, makeGrid, makeVelocities } from './wasm.js';
 
 await initWasm();
 
@@ -20,6 +20,7 @@ const SIMS = {
     showGrid: true,
     colorBySpeed: true, // tint balls by speed (hot = fast)
     speedScale: 12,
+    arrowScale: 0.05, // velocity-arrow length per unit speed
     centralScale: 1,
     hasGravityParam: true,
     gravLabel: 'Gravity',
@@ -42,6 +43,7 @@ const SIMS = {
     showGrid: false,
     colorBySpeed: true,
     speedScale: 16,
+    arrowScale: 0.045,
     centralScale: 6, // draw the heavy central body (index 0) larger
     hasGravityParam: true,
     gravLabel: 'Gravity G',
@@ -113,6 +115,75 @@ const SIMS = {
     camTarget: new THREE.Vector3(0, -0.3, 0),
     hint: 'A pinned mass-spring cloth billowing in the wind · toggle Pin · left-drag to orbit',
   },
+  descent: {
+    kind: 4,
+    accent: '#7ad1a5', // mint green — the "converged" signal color
+    contour: true, // paints a top-down loss-landscape heatmap under the walkers
+    colorByLoss: true, // walker dots brighten as their loss drops
+    // "Count" is the number of optimizer walkers racing down the surface.
+    defaultCount: 12,
+    minCount: 1,
+    maxCount: 64,
+    countName: 'Walkers',
+    boxed: false,
+    showGrid: false,
+    grabbable: false, // walkers are driven by the optimizer; left-drag orbits
+    rods: false,
+    cloth: false,
+    colorBySpeed: false,
+    centralScale: 1,
+    speedScale: 1,
+    // The learning rate rides the shared "gravity" slider (set_param id 0). A
+    // per-sim decimals override keeps small rates (0.05) from rounding to "0.1".
+    hasGravityParam: true,
+    gravLabel: 'Learning rate',
+    gravMin: 0.001,
+    gravMax: 0.3,
+    gravStep: 0.001,
+    gravDefault: 0.05,
+    gravDecimals: 3,
+    // Landscape + optimizer pickers (filled into the .select navs) and the
+    // momentum/Adam β slider.
+    landscapes: ['Bowl', 'Saddle', 'Rosenbrock', 'Himmelblau', 'Rastrigin'],
+    optimizers: ['SGD', 'Momentum', 'RMSProp', 'Adam'],
+    defaultLandscape: 0, // Bowl
+    defaultOptimizer: 3, // Adam
+    hasBeta: true,
+    betaDefault: 0.9,
+    betaMin: 0,
+    betaMax: 0.999,
+    betaStep: 0.001,
+    // Straight top-down; the tiny x/z offset avoids an OrbitControls gimbal flip.
+    camPos: new THREE.Vector3(0.001, 14, 0.001),
+    camTarget: new THREE.Vector3(0, 0, 0),
+    hint: 'Optimizers race down a loss landscape · pick a function & optimizer · left-drag to orbit',
+  },
+  boids: {
+    kind: 5,
+    accent: '#e8718d', // rose — a lively flock against the cool sims
+    defaultCount: 180,
+    minCount: 30,
+    maxCount: 400, // naive O(n^2) neighbour search stays smooth to a few hundred
+    countName: 'Boids',
+    boxed: false, // open 3D space; boids softly turn back from invisible bounds
+    showGrid: false,
+    colorBySpeed: true, // tint by speed (warm = fast)
+    speedScale: 2.8, // boids settle into a tight cruise band — compress so the ramp still spreads
+    arrowScale: 0.25,
+    centralScale: 1,
+    grabbable: false, // boids are autonomous; left-drag always orbits
+    rods: false,
+    // The shared "gravity" slider drives cohesion strength (set_param id 0): how
+    // hard boids steer toward their local flockmates' centre of mass.
+    hasGravityParam: true,
+    gravLabel: 'Cohesion',
+    gravMin: 0,
+    gravMax: 3,
+    gravStep: 0.1,
+    gravDefault: 1,
+    camPos: new THREE.Vector3(13, 9, 18),
+    hint: 'Emergent flocking from three local rules — separation, alignment, cohesion · left-drag to orbit',
+  },
 };
 
 let simKey = 'collisions';
@@ -122,6 +193,9 @@ let cfg = SIMS[simKey];
 let world = null;
 let positions = null;
 let extra = null;
+let vel = null; // flat velocity view (sims that expose one: collisions/gravity/boids)
+let lossGrid = null; // loss-landscape heatmap view (gradient-descent sim only)
+let simHasVel = false; // does the active sim expose a velocity buffer? (arrows/trails gate)
 let simRadius = 0.4;
 let simBounds = 4;
 let count = 0;
@@ -129,7 +203,9 @@ let bodyCount = cfg.defaultCount;
 
 // --- renderer / scene -----------------------------------------------------
 const canvas = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+// preserveDrawingBuffer keeps the rendered frame readable by canvas.toBlob for
+// the screenshot feature (S key), at a negligible cost for this scene.
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 
@@ -362,6 +438,272 @@ function updateCloth(p) {
   clothGeo.computeVertexNormals();
 }
 
+// --- gradient-descent contour heatmap (sim #4) ----------------------------
+// A flat plane lying in the XZ-plane just under the walkers, textured with the
+// loss landscape sampled by Rust. The math domain is centred on the world
+// origin and scaled to ±domain_extent, so the walkers (also in world coords)
+// land exactly on their loss value.
+let contourMesh = null;
+let contourGeo = null;
+let contourMat = null;
+let contourTex = null;
+let contourData = null; // Uint8 RGBA backing the DataTexture
+let contourDim = 0;
+// #7ad1a5 — the basin accent, premultiplied to 0..1 for blending.
+const ACCENT_RGB = [0x7a / 255, 0xd1 / 255, 0xa5 / 255];
+const ISO_BANDS = 7; // number of baked iso-contour lines
+
+function buildContour() {
+  if (contourMesh) {
+    scene.remove(contourMesh);
+    contourGeo.dispose();
+    contourTex.dispose();
+    contourMat.dispose();
+    contourMesh = null;
+  }
+  const dim = world.grid_dim();
+  const ext = world.domain_extent();
+  contourDim = dim;
+  contourData = new Uint8Array(dim * dim * 4);
+  contourTex = new THREE.DataTexture(contourData, dim, dim, THREE.RGBAFormat, THREE.UnsignedByteType);
+  contourTex.minFilter = THREE.LinearFilter;
+  contourTex.magFilter = THREE.LinearFilter;
+  contourMat = new THREE.MeshBasicMaterial({ map: contourTex }); // unlit: the heatmap IS the color
+  contourGeo = new THREE.PlaneGeometry(ext * 2, ext * 2);
+  contourMesh = new THREE.Mesh(contourGeo, contourMat);
+  contourMesh.rotation.x = -Math.PI / 2; // lie flat in the XZ-plane
+  contourMesh.position.y = -0.01; // just below the walkers/trails
+  contourMesh.frustumCulled = false;
+  scene.add(contourMesh);
+  refreshContourTexture();
+}
+
+// Repaint the heatmap from the Rust grid. Cheap dynamic-range compression (sqrt)
+// keeps high-range landscapes (Rosenbrock/Rastrigin) from washing out to a flat
+// square; baked iso-bands and a restrained basin accent add readable structure.
+// Rebuilt only on sim load + landscape change, never per frame.
+function refreshContourTexture() {
+  if (!contourMesh) return;
+  const g = lossGrid();
+  const dim = contourDim;
+  if (g.length < dim * dim) return;
+  const lo = world.loss_min();
+  const hi = world.loss_max();
+  const range = hi > lo ? hi - lo : 1;
+  for (let row = 0; row < dim; row++) {
+    // Flip V so the math-y axis aligns with world +Z (verified: Rosenbrock's
+    // valley lands where the walkers converge).
+    const gridRow = dim - 1 - row;
+    for (let col = 0; col < dim; col++) {
+      const f = g[gridRow * dim + col];
+      let t = (f - lo) / range;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      t = Math.sqrt(t); // compress the dynamic range
+      let lum = 0.06 + 0.62 * t; // dark valley -> light ridge
+      // Iso-band: a thin dark line at each evenly spaced level crossing.
+      const frac = t * ISO_BANDS - Math.floor(t * ISO_BANDS);
+      if (frac < 0.07 || frac > 0.93) lum *= 0.55;
+      // Basin accent: tint the low-loss region toward mint (strong near t=0).
+      const basin = 1 - t * 2.0;
+      const b = basin < 0 ? 0 : basin;
+      const r = lum + (ACCENT_RGB[0] - lum) * 0.3 * b;
+      const gc = lum + (ACCENT_RGB[1] - lum) * 0.3 * b;
+      const bc = lum + (ACCENT_RGB[2] - lum) * 0.3 * b;
+      const o = (row * dim + col) * 4;
+      contourData[o] = (r * 255) | 0;
+      contourData[o + 1] = (gc * 255) | 0;
+      contourData[o + 2] = (bc * 255) | 0;
+      contourData[o + 3] = 255;
+    }
+  }
+  contourTex.needsUpdate = true;
+}
+
+// Fading motion trails: a per-body ring buffer of recent world positions drawn
+// as age-faded line ribbons. Two modes share this code. The gradient-descent sim
+// always shows them, flattened onto the contour plane and tinted per-walker so
+// each optimizer's path is legible. The free-particle sims (collisions / gravity
+// / boids) show them on demand (the Trails toggle), in full 3D and tinted with
+// the sim accent so motion reads as comet streaks.
+const TRAIL_CONTOUR_LEN = 64; // ring length for the descent walkers
+const TRAIL_FREE_LEN = 28; // shorter for the (far more numerous) free particles
+const TRAIL_Y = 0.005; // contour mode: lift trails just above the plane
+let trailLen = TRAIL_CONTOUR_LEN; // active ring length (set per build)
+let trailFlat = true; // contour mode flattens the trail onto the plane (drops y)
+const trailColor = new THREE.Color(); // free-particle accent (parsed per build)
+let trailGeo = null;
+let trailPos = null; // Float32Array backing the LineSegments positions
+let trailCol = null; // per-vertex colors (faded by age)
+let trailLines = null;
+let trailHist = null; // ring buffer: trailCount * trailLen * 3 world coords
+let trailHead = 0; // next write slot in the ring
+let trailCount = 0; // body count the buffers were sized for
+
+function buildTrails() {
+  if (trailLines) {
+    scene.remove(trailLines);
+    trailGeo.dispose();
+    trailLines = null;
+  }
+  trailFlat = !!cfg.contour;
+  trailLen = trailFlat ? TRAIL_CONTOUR_LEN : TRAIL_FREE_LEN;
+  if (!trailFlat) trailColor.set(cfg.accent || '#9ad0ff');
+  trailCount = count;
+  const segs = trailLen - 1;
+  const nVerts = trailCount * segs * 2; // LineSegments: 2 endpoints per segment
+  trailHist = new Float32Array(trailCount * trailLen * 3);
+  trailPos = new Float32Array(nVerts * 3);
+  trailCol = new Float32Array(nVerts * 3);
+  trailHead = 0;
+  trailGeo = new THREE.BufferGeometry();
+  trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPos, 3));
+  trailGeo.setAttribute('color', new THREE.BufferAttribute(trailCol, 3));
+  trailLines = new THREE.LineSegments(trailGeo, rodMat); // reuse the vertex-colored line material
+  trailLines.frustumCulled = false;
+  scene.add(trailLines);
+  primeTrails();
+}
+
+// Fill every walker's whole ring with its current position, so a fresh start (or
+// a landscape/optimizer switch) doesn't draw a streak from the previous spot.
+function primeTrails() {
+  if (!trailHist) return;
+  const p = positions();
+  for (let w = 0; w < trailCount; w++) {
+    const px = p[w * 3];
+    const py = trailFlat ? TRAIL_Y : p[w * 3 + 1];
+    const pz = p[w * 3 + 2];
+    for (let c = 0; c < trailLen; c++) {
+      const h = (w * trailLen + c) * 3;
+      trailHist[h] = px;
+      trailHist[h + 1] = py;
+      trailHist[h + 2] = pz;
+    }
+  }
+  trailHead = 0;
+  rebuildTrailSegments();
+}
+
+// Record the current positions into the ring and rebuild the segment buffers.
+function updateTrails(p) {
+  if (!trailHist) return;
+  for (let w = 0; w < trailCount; w++) {
+    const h = (w * trailLen + trailHead) * 3;
+    trailHist[h] = p[w * 3];
+    trailHist[h + 1] = trailFlat ? TRAIL_Y : p[w * 3 + 1];
+    trailHist[h + 2] = p[w * 3 + 2];
+  }
+  trailHead = (trailHead + 1) % trailLen;
+  rebuildTrailSegments();
+}
+
+// Walk each ring oldest->newest, emitting line segments whose color is the
+// walker's hue dimmed by age (older = fainter). One distinct hue per walker so
+// the individual trajectories stay legible as they converge.
+function rebuildTrailSegments() {
+  const segs = trailLen - 1;
+  let v = 0;
+  for (let w = 0; w < trailCount; w++) {
+    // Contour: a distinct hue per walker so trajectories stay legible. Free
+    // particles: the single sim accent (per-body hues would be visual noise).
+    if (trailFlat) indexToColor(w, trailCount, tmpColor);
+    else tmpColor.copy(trailColor);
+    for (let c = 0; c < segs; c++) {
+      const rOld = (trailHead + c) % trailLen;
+      const rNew = (trailHead + c + 1) % trailLen;
+      const hOld = (w * trailLen + rOld) * 3;
+      const hNew = (w * trailLen + rNew) * 3;
+      const fade = (c + 1) / segs; // 0 (oldest) -> 1 (newest)
+      const o = v * 3;
+      trailPos[o] = trailHist[hOld];
+      trailPos[o + 1] = trailHist[hOld + 1];
+      trailPos[o + 2] = trailHist[hOld + 2];
+      trailPos[o + 3] = trailHist[hNew];
+      trailPos[o + 4] = trailHist[hNew + 1];
+      trailPos[o + 5] = trailHist[hNew + 2];
+      const cr = tmpColor.r * fade;
+      const cg = tmpColor.g * fade;
+      const cb = tmpColor.b * fade;
+      trailCol[o] = cr;
+      trailCol[o + 1] = cg;
+      trailCol[o + 2] = cb;
+      trailCol[o + 3] = cr;
+      trailCol[o + 4] = cg;
+      trailCol[o + 5] = cb;
+      v += 2;
+    }
+  }
+  trailGeo.attributes.position.needsUpdate = true;
+  trailGeo.attributes.color.needsUpdate = true;
+}
+
+// --- velocity arrows (D41) -------------------------------------------------
+// One short line per body, from its position along its velocity. Length scales
+// per sim and is capped so fast bodies don't draw runaway streaks; the colour
+// follows the active speed colour map (dim tail -> bright head for direction).
+// Built only for sims that expose a velocity buffer (collisions/gravity/boids).
+const ARROW_MAX = 1.3; // world-space cap on a single arrow's length
+const arrowMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85 });
+let arrowGeo = null;
+let arrowPos = null; // Float32Array backing the LineSegments positions (2 verts/body)
+let arrowCol = null; // per-vertex colors (tail dim, head full)
+let arrowLines = null;
+let arrowCount = 0; // body count the buffers were sized for
+
+function buildArrows() {
+  if (arrowLines) {
+    scene.remove(arrowLines);
+    arrowGeo.dispose();
+    arrowLines = null;
+  }
+  arrowCount = count;
+  arrowPos = new Float32Array(arrowCount * 2 * 3);
+  arrowCol = new Float32Array(arrowCount * 2 * 3);
+  arrowGeo = new THREE.BufferGeometry();
+  arrowGeo.setAttribute('position', new THREE.BufferAttribute(arrowPos, 3));
+  arrowGeo.setAttribute('color', new THREE.BufferAttribute(arrowCol, 3));
+  arrowLines = new THREE.LineSegments(arrowGeo, arrowMat);
+  arrowLines.frustumCulled = false;
+  scene.add(arrowLines);
+}
+
+// Rewrite arrow endpoints + colors from the live position/velocity buffers.
+function updateArrows(p) {
+  const v = vel();
+  const ex = extra();
+  const s = cfg.arrowScale || 0.05;
+  const sc = cfg.speedScale || 1;
+  for (let i = 0; i < arrowCount; i++) {
+    const k = i * 3;
+    let ax = v[k] * s;
+    let ay = v[k + 1] * s;
+    let az = v[k + 2] * s;
+    const len = Math.hypot(ax, ay, az);
+    if (len > ARROW_MAX) {
+      const t = ARROW_MAX / len;
+      ax *= t;
+      ay *= t;
+      az *= t;
+    }
+    const o = i * 6;
+    arrowPos[o] = p[k];
+    arrowPos[o + 1] = p[k + 1];
+    arrowPos[o + 2] = p[k + 2];
+    arrowPos[o + 3] = p[k] + ax;
+    arrowPos[o + 4] = p[k + 1] + ay;
+    arrowPos[o + 5] = p[k + 2] + az;
+    speedToColor((ex.length ? ex[i] : len) / sc, tmpColor);
+    arrowCol[o] = tmpColor.r * 0.25; // tail
+    arrowCol[o + 1] = tmpColor.g * 0.25;
+    arrowCol[o + 2] = tmpColor.b * 0.25;
+    arrowCol[o + 3] = tmpColor.r; // head
+    arrowCol[o + 4] = tmpColor.g;
+    arrowCol[o + 5] = tmpColor.b;
+  }
+  arrowGeo.attributes.position.needsUpdate = true;
+  arrowGeo.attributes.color.needsUpdate = true;
+}
+
 // (Re)create the InstancedMesh for the current body count. instanceColor must
 // be fully initialized or untouched instances render black. For sims that render
 // their own geometry (cloth) the instanced spheres are built but hidden.
@@ -382,6 +724,28 @@ function buildMesh() {
 
   if (cfg.cloth) buildCloth(Math.round(Math.sqrt(count)));
   else if (clothMesh) clothMesh.visible = false;
+
+  // Loss-landscape heatmap (descent only).
+  if (cfg.contour) buildContour();
+  else if (contourMesh) contourMesh.visible = false;
+
+  // Fading trails: always-on for the contour sim, opt-in for the velocity-bearing
+  // free-particle sims. Build the geometry whenever it could be shown so toggling
+  // is instant; display is gated on the toggle.
+  if (cfg.contour || simHasVel) {
+    buildTrails();
+    trailLines.visible = cfg.contour || trailsOn;
+  } else if (trailLines) {
+    trailLines.visible = false;
+  }
+
+  // Velocity arrows: opt-in, only where the sim exposes a velocity buffer.
+  if (simHasVel) {
+    buildArrows();
+    arrowLines.visible = arrowsOn;
+  } else if (arrowLines) {
+    arrowLines.visible = false;
+  }
 }
 
 // Rebuild the active sim with a new body count (slider / sim switch).
@@ -392,11 +756,17 @@ function buildWorld(n) {
   world = new World(cfg.kind, n);
   positions = makePositions(world);
   extra = makeExtra(world);
+  vel = makeVelocities(world);
+  lossGrid = makeGrid(world);
   simRadius = world.radius();
   simBounds = world.bounds();
   count = world.count();
+  simHasVel = world.vel_len() > 0; // gates the arrow/trail overlays (set before buildMesh)
   buildMesh();
   statCount.textContent = count;
+  // A fresh World boots at the sim's built-in defaults; re-push the live control
+  // state so a count change (or sim load) preserves the user's selections.
+  reapplyParams();
 }
 
 // Frame the camera on the active sim (used on sim load and by Reset View).
@@ -408,7 +778,10 @@ function frameCamera() {
 }
 
 // Switch to a different sim: reconfigure environment, controls, UI, then build.
-function loadSim(nextKey) {
+// `restore` (optional) carries persisted control state (URL hash / localStorage);
+// each per-sim default below falls back to it so a shared link or a return visit
+// reopens with the user's exact settings.
+function loadSim(nextKey, restore) {
   if (!SIMS[nextKey]) return;
   simKey = nextKey;
   cfg = SIMS[nextKey];
@@ -426,11 +799,19 @@ function loadSim(nextKey) {
   grid.visible = cfg.showGrid;
   box.visible = cfg.boxed;
 
+  // Speed is a global multiplier (not per-sim), so only a restore touches it.
+  if (restore?.spd != null) {
+    speed = clamp(restore.spd, parseFloat(speedSlider.min), parseFloat(speedSlider.max));
+    speedSlider.value = String(speed);
+    speedLabel.textContent = `${speed.toFixed(1)}×`;
+  }
+
   countName.textContent = cfg.countName || 'Count';
   countSlider.min = String(cfg.minCount);
   countSlider.max = String(cfg.maxCount);
-  countSlider.value = String(cfg.defaultCount);
-  countLabel.textContent = String(cfg.defaultCount);
+  const initCount = restore?.n != null ? clamp(Math.round(restore.n), cfg.minCount, cfg.maxCount) : cfg.defaultCount;
+  countSlider.value = String(initCount);
+  countLabel.textContent = String(initCount);
 
   // The gravity control is shared; each sim relabels/rescales it (and a fresh
   // World starts at the matching default, so no set_param push is needed here).
@@ -440,8 +821,9 @@ function loadSim(nextKey) {
     gravSlider.min = String(cfg.gravMin);
     gravSlider.max = String(cfg.gravMax);
     gravSlider.step = String(cfg.gravStep);
-    gravSlider.value = String(cfg.gravDefault);
-    gravLabel.textContent = cfg.gravDefault.toFixed(1);
+    const g = restore?.g != null ? clamp(restore.g, cfg.gravMin, cfg.gravMax) : cfg.gravDefault;
+    gravSlider.value = String(g);
+    gravLabel.textContent = g.toFixed(cfg.gravDecimals ?? 1);
   }
 
   // Wind control (cloth only): same shared-default trick as gravity.
@@ -451,17 +833,81 @@ function loadSim(nextKey) {
     windSlider.min = String(cfg.windMin);
     windSlider.max = String(cfg.windMax);
     windSlider.step = String(cfg.windStep);
-    windSlider.value = String(cfg.windDefault);
-    windLabel.textContent = cfg.windDefault.toFixed(1);
+    const w = restore?.w != null ? clamp(restore.w, cfg.windMin, cfg.windMax) : cfg.windDefault;
+    windSlider.value = String(w);
+    windLabel.textContent = w.toFixed(1);
   }
 
+  // Pin toggle (cloth only): defaults to corners-pinned unless a restore overrides.
+  pinMode = cfg.hasPin ? (restore?.pin ?? 0) : 0;
+  btnPin.style.display = cfg.hasPin ? '' : 'none';
+  btnPin.classList.toggle('is-on', pinMode === 1);
+  if (cfg.hasPin) btnPin.querySelector('.lbl').textContent = pinMode === 1 ? 'Pin: Top Edge' : 'Pin: Corners';
+
+  // Gradient-descent selector state (read by reapplyParams inside buildWorld, so
+  // it must be set BEFORE the build).
+  if (cfg.contour) {
+    landscapeIdx = restore?.land ?? cfg.defaultLandscape ?? 0;
+    optimizerIdx = restore?.opt ?? cfg.defaultOptimizer ?? 3;
+    betaVal = restore?.beta ?? cfg.betaDefault ?? 0.9;
+  }
+
+  // Visualization-overlay state (read by buildMesh inside buildWorld). The arrow
+  // / trail toggles carry across sims as a preference; a restore overrides them.
+  if (restore?.arr != null) arrowsOn = !!restore.arr;
+  if (restore?.trl != null) trailsOn = !!restore.trl;
+  if (restore?.cmap != null) colormapIdx = clamp(restore.cmap | 0, 0, COLORMAPS.length - 1);
+
+  buildWorld(initCount);
+
+  // Landscape / optimizer / beta controls (gradient-descent only). Built AFTER
+  // buildWorld so `world` exists for the pick handlers.
+  const isContour = !!cfg.contour;
+  landscapeRow.style.display = isContour ? '' : 'none';
+  optimizerRow.style.display = isContour ? '' : 'none';
+  betaRow.style.display = isContour && cfg.hasBeta ? '' : 'none';
+  if (isContour) {
+    buildSelect(landscapeNav, cfg.landscapes, landscapeIdx, (i) => {
+      landscapeIdx = i;
+      world.set_param(1, i); // rebuilds the grid + re-seeds walkers in Rust
+      refreshContourTexture();
+      primeTrails();
+      schedulePersist();
+    });
+    buildSelect(optimizerNav, cfg.optimizers, optimizerIdx, (i) => {
+      optimizerIdx = i;
+      world.set_param(2, i); // re-seeds for a fair restart
+      primeTrails();
+      schedulePersist();
+    });
+    if (cfg.hasBeta) {
+      betaSlider.min = String(cfg.betaMin);
+      betaSlider.max = String(cfg.betaMax);
+      betaSlider.step = String(cfg.betaStep);
+      betaSlider.value = String(betaVal);
+      betaLabel.textContent = betaVal.toFixed(2);
+    }
+  }
   // Pin toggle (cloth only): always starts at corners-pinned.
   pinMode = 0;
   pinWrap.classList.toggle('is-collapsed', !cfg.hasPin);
   btnPin.classList.remove('is-on');
   if (cfg.hasPin) btnPin.querySelector('.lbl').textContent = 'Pin: Corners';
 
-  buildWorld(cfg.defaultCount);
+  // Velocity-arrow & trail toggles: only for sims that expose a velocity buffer.
+  btnArrows.style.display = simHasVel ? '' : 'none';
+  btnTrails.style.display = simHasVel ? '' : 'none';
+  btnArrows.classList.toggle('is-on', simHasVel && arrowsOn);
+  btnTrails.classList.toggle('is-on', simHasVel && trailsOn);
+
+  // Speed colour-map picker: only for speed-coloured sims.
+  colormapRow.style.display = cfg.colorBySpeed ? '' : 'none';
+  if (cfg.colorBySpeed) {
+    buildSelect(colormapNav, COLORMAPS.map((c) => c.name), colormapIdx, (i) => {
+      colormapIdx = i;
+      schedulePersist();
+    });
+  }
 
   frameCamera();
 
@@ -469,6 +915,25 @@ function loadSim(nextKey) {
 
   if (cfg.hint) hintEl.textContent = cfg.hint;
   for (const b of segBtns) b.classList.toggle('is-active', b.dataset.sim === nextKey);
+
+  schedulePersist();
+}
+
+// Fill a `.select` nav with one borderless button per label; clicking re-marks
+// the active button and fires `onPick(index)`.
+function buildSelect(container, labels, activeIdx, onPick) {
+  container.innerHTML = '';
+  labels.forEach((label, i) => {
+    const b = document.createElement('button');
+    b.className = 'select__btn' + (i === activeIdx ? ' is-active' : '');
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      for (const c of container.children) c.classList.remove('is-active');
+      b.classList.add('is-active');
+      onPick(i);
+    });
+    container.appendChild(b);
+  });
   positionSeg();
 }
 
@@ -488,6 +953,17 @@ const windSlider = document.getElementById('wind-slider');
 const windLabel = document.getElementById('wind-label');
 const windName = document.getElementById('wind-name');
 const windRow = document.getElementById('wind-row');
+const landscapeRow = document.getElementById('landscape-row');
+const landscapeNav = document.getElementById('landscape-nav');
+const optimizerRow = document.getElementById('optimizer-row');
+const optimizerNav = document.getElementById('optimizer-nav');
+const betaRow = document.getElementById('beta-row');
+const betaSlider = document.getElementById('beta-slider');
+const betaLabel = document.getElementById('beta-label');
+const colormapRow = document.getElementById('colormap-row');
+const colormapNav = document.getElementById('colormap-nav');
+const btnArrows = document.getElementById('btn-arrows');
+const btnTrails = document.getElementById('btn-trails');
 const btnPin = document.getElementById('btn-pin');
 const btnPause = document.getElementById('btn-pause');
 const btnStep = document.getElementById('btn-step');
@@ -554,6 +1030,12 @@ function positionSeg() {
 let speed = 1; // sim-time multiplier
 let paused = false;
 let pinMode = 0; // cloth pin mode: 0 = corners, 1 = top edge
+let landscapeIdx = 0; // gradient-descent: selected loss landscape
+let optimizerIdx = 3; // gradient-descent: selected optimizer (default Adam)
+let betaVal = 0.9; // gradient-descent: momentum / Adam beta1
+let arrowsOn = false; // velocity-arrow overlay (collisions / gravity / boids)
+let trailsOn = false; // fading-trail overlay (collisions / gravity / boids)
+let colormapIdx = 0; // active speed colour map (D43)
 
 // Paint a slider's accent "fill" up to its current value (CSS reads --fill for the
 // WebKit track gradient; Firefox uses native ::-moz-range-progress and ignores it).
@@ -567,9 +1049,13 @@ function setFill(el) {
 function refreshFills() {
   for (const el of document.querySelectorAll('input[type="range"]')) setFill(el);
 }
-// One delegated listener keeps every slider's fill in sync as it's dragged.
+// One delegated listener keeps every slider's fill in sync as it's dragged, and
+// schedules a (debounced) persist so any slider change lands in URL + storage.
 document.querySelector('.panel').addEventListener('input', (e) => {
-  if (e.target.matches('input[type="range"]')) setFill(e.target);
+  if (e.target.matches('input[type="range"]')) {
+    setFill(e.target);
+    schedulePersist();
+  }
 });
 
 for (const b of segBtns) {
@@ -602,9 +1088,10 @@ speedSlider.addEventListener('input', () => {
 
 gravSlider.addEventListener('input', () => {
   const g = parseFloat(gravSlider.value);
-  gravLabel.textContent = g.toFixed(1);
+  gravLabel.textContent = g.toFixed(cfg.gravDecimals ?? 1);
   // id 0 is each sim's primary tunable: gravity multiplier (collisions),
-  // gravitational constant G (n-body), or gravity g (pendulum / cloth).
+  // gravitational constant G (n-body), gravity g (pendulum / cloth), or the
+  // learning rate (gradient descent).
   world.set_param(0, g);
 });
 
@@ -615,12 +1102,39 @@ windSlider.addEventListener('input', () => {
   world.set_param(1, w);
 });
 
+// Momentum / Adam beta1 (gradient descent): id 3.
+betaSlider.addEventListener('input', () => {
+  betaVal = parseFloat(betaSlider.value);
+  betaLabel.textContent = betaVal.toFixed(2);
+  world.set_param(3, betaVal);
+});
+
 // Pin mode toggle (cloth): id 2, 0 = corners, 1 = whole top edge.
 btnPin.addEventListener('click', () => {
   pinMode = pinMode === 0 ? 1 : 0;
   world.set_param(2, pinMode);
   btnPin.querySelector('.lbl').textContent = pinMode === 1 ? 'Pin: Top Edge' : 'Pin: Corners';
   btnPin.classList.toggle('is-on', pinMode === 1);
+  schedulePersist();
+});
+
+// Velocity arrows toggle (D41): overlay one direction arrow per body.
+btnArrows.addEventListener('click', () => {
+  arrowsOn = !arrowsOn;
+  if (arrowLines) arrowLines.visible = arrowsOn;
+  btnArrows.classList.toggle('is-on', arrowsOn);
+  schedulePersist();
+});
+
+// Fading trails toggle (D42): overlay age-faded motion ribbons.
+btnTrails.addEventListener('click', () => {
+  trailsOn = !trailsOn;
+  if (trailLines) {
+    trailLines.visible = trailsOn;
+    if (trailsOn) primeTrails(); // start fresh — no streak from stale history
+  }
+  btnTrails.classList.toggle('is-on', trailsOn);
+  schedulePersist();
 });
 
 btnPause.addEventListener('click', () => {
@@ -750,9 +1264,21 @@ setMotion.addEventListener('change', () => {
 // Re-push the current slider/toggle state onto a freshly-built World (reset spins
 // up a new sim at its built-in defaults, which can drift from the live controls).
 function reapplyParams() {
+  resetInterp(); // positions just snapped (rebuild / reset) — don't lerp across them
   if (cfg.hasGravityParam) world.set_param(0, parseFloat(gravSlider.value));
   if (cfg.hasWind) world.set_param(1, parseFloat(windSlider.value));
   if (cfg.hasPin) world.set_param(2, pinMode);
+  // Gradient descent: id 1 = landscape, id 2 = optimizer, id 3 = beta. (These
+  // never collide with wind/pin: contour sims set neither hasWind nor hasPin.)
+  if (cfg.contour) {
+    world.set_param(1, landscapeIdx);
+    world.set_param(2, optimizerIdx);
+    if (cfg.hasBeta) world.set_param(3, betaVal);
+    refreshContourTexture();
+    primeTrails();
+  } else if (trailsOn && trailLines && simHasVel) {
+    primeTrails(); // free-particle trails: avoid a streak after a reset/rebuild
+  }
 }
 
 document.getElementById('btn-reset').addEventListener('click', () => {
@@ -894,10 +1420,49 @@ window.addEventListener('resize', () => {
   positionNav();
 });
 
-// Map a normalized speed [0,1] to a blue(slow) -> orange(fast) color.
+// --- speed colour maps (D43) ----------------------------------------------
+// Each maps a normalized speed t∈[0,1] into `out`. "Thermal" is the original
+// blue→orange ramp; Viridis/Magma are the perceptual maps approximated from a
+// few sRGB anchors; Mono is a neutral light ramp. Selected by `colormapIdx` and
+// applied to every speed-coloured sim (its dots and its velocity arrows).
+const VIRIDIS = [[68, 1, 84], [59, 82, 139], [33, 144, 140], [94, 201, 98], [253, 231, 37]];
+const MAGMA = [[0, 0, 4], [81, 18, 124], [183, 55, 121], [252, 137, 97], [252, 253, 191]];
+
+// Piecewise-linear interpolation across an sRGB anchor list into `out`.
+function rampLerp(anchors, t, out) {
+  const n = anchors.length - 1;
+  const x = clamp(t, 0, 1) * n;
+  const i = Math.min(x | 0, n - 1);
+  const f = x - i;
+  const a = anchors[i];
+  const b = anchors[i + 1];
+  return out.setRGB(
+    (a[0] + (b[0] - a[0]) * f) / 255,
+    (a[1] + (b[1] - a[1]) * f) / 255,
+    (a[2] + (b[2] - a[2]) * f) / 255,
+    THREE.SRGBColorSpace,
+  );
+}
+
+const COLORMAPS = [
+  { name: 'Thermal', fn: (t, out) => out.setHSL(0.62 - 0.54 * clamp(t, 0, 1), 0.72, 0.38 + 0.34 * clamp(t, 0, 1)) },
+  { name: 'Viridis', fn: (t, out) => rampLerp(VIRIDIS, t, out) },
+  { name: 'Magma', fn: (t, out) => rampLerp(MAGMA, t, out) },
+  { name: 'Mono', fn: (t, out) => out.setHSL(0, 0, 0.22 + 0.62 * clamp(t, 0, 1)) },
+];
+
+// Map a normalized speed [0,1] to a colour via the active colour map.
 function speedToColor(t, out) {
+  return (COLORMAPS[colormapIdx] || COLORMAPS[0]).fn(t, out);
+}
+
+// Map a walker's loss to a color: low loss -> bright mint (converged), high loss
+// -> dim grey. sqrt-compressed so a wide loss range still spreads visibly.
+function lossToColor(loss, lo, hi, out) {
+  let t = hi > lo ? (loss - lo) / (hi - lo) : 0;
   t = clamp(t, 0, 1);
-  return out.setHSL(0.62 - 0.54 * t, 0.72, 0.38 + 0.34 * t);
+  t = Math.sqrt(t);
+  return out.setHSL(0.41, 0.55 * (1 - t) + 0.05, 0.66 - 0.46 * t);
 }
 
 // --- render + fixed-timestep loop -----------------------------------------
@@ -907,13 +1472,48 @@ let acc = 0;
 let fpsTime = 0;
 let fpsFrames = 0;
 
+// Frame interpolation. Physics runs at a fixed 120 Hz, but the display may
+// refresh faster (144 / 165 / 240 Hz). Rendering the raw sim state would repeat
+// whole frames whenever the monitor outruns the tick — uneven judder that reads
+// as "not really 144". Instead we keep the previous and current physics states
+// and render the lerp between them by the leftover-accumulator fraction, so
+// motion is smooth at any refresh rate without paying for extra physics steps.
+let posPrev = null; // flat positions snapshot BEFORE the most recent step
+let posCur = null; //  flat positions snapshot AFTER the most recent step
+let posLerp = null; // interpolated buffer handed to render()
+let interpLen = 0; //  length the three buffers are sized to
+let interpAlpha = 1; // fraction in [0,1) from posPrev toward posCur
+
+// Drop the cached states so the next stepped frame re-snapshots from the live
+// buffer. Called on every world (re)build / reset / count change to prevent a
+// one-frame lerp across stale positions (which would flash the old layout).
+function resetInterp() {
+  interpLen = 0;
+  interpAlpha = 1;
+}
+
 function render() {
-  const p = positions(); // re-fetched AFTER stepping (step may reallocate)
-  const ex = cfg.colorBySpeed ? extra() : null;
+  // Hand downstream a smoothed position buffer between physics steps. Fall back
+  // to the live state while paused, while dragging (so the held body tracks the
+  // pointer exactly), or before any step has populated the snapshots.
+  let p;
+  if (interpLen && posLerp && !paused && grabbed < 0 && interpAlpha < 1) {
+    const a = interpAlpha < 0 ? 0 : interpAlpha;
+    const b = 1 - a;
+    for (let i = 0; i < interpLen; i++) posLerp[i] = posPrev[i] * b + posCur[i] * a;
+    p = posLerp;
+  } else {
+    p = positions(); // re-fetched AFTER stepping (step may reallocate)
+  }
+  const byLoss = cfg.colorByLoss;
+  const ex = cfg.colorBySpeed || byLoss ? extra() : null;
   const byIndex = cfg.colorByIndex;
   const recolor = ex || byIndex;
   const cs = cfg.centralScale;
   const pend = count / 2; // only used for pendulum index coloring
+  // Loss range for color normalization (WASM calls — hoisted out of the loop).
+  const lossLo = byLoss ? world.loss_min() : 0;
+  const lossHi = byLoss ? world.loss_max() : 1;
   // Cloth renders its own mesh; the instanced spheres stay hidden, so skip them.
   if (cfg.bobs !== false) {
     for (let i = 0; i < count; i++) {
@@ -924,7 +1524,8 @@ function render() {
       mesh.setMatrixAt(i, dummy.matrix);
       if (recolor) {
         if (i === grabbed) tmpColor.copy(HELD_COLOR);
-        else if (ex) speedToColor(ex[i] / cfg.speedScale, tmpColor);
+        else if (byLoss) lossToColor(ex[i], lossLo, lossHi, tmpColor);
+        else if (cfg.colorBySpeed) speedToColor(ex[i] / cfg.speedScale, tmpColor);
         else indexToColor((i / 2) | 0, pend, tmpColor); // two bobs share a pendulum hue
         mesh.setColorAt(i, tmpColor);
       }
@@ -934,6 +1535,8 @@ function render() {
   }
   if (cfg.rods && rodLines) updateRods(p);
   if (cfg.cloth && clothMesh) updateCloth(p);
+  if (trailLines && trailLines.visible) updateTrails(p);
+  if (arrowLines && arrowLines.visible) updateArrows(p);
   controls.update();
   renderer.render(scene, camera);
 }
@@ -947,10 +1550,22 @@ function frame(now) {
   } else {
     acc += dt * speed;
     while (acc >= FIXED) {
+      const before = positions();
+      if (before.length !== interpLen) {
+        // (Re)size snapshots to the live buffer — only changes on sim load /
+        // count change; a step's realloc moves the pointer but keeps the length.
+        interpLen = before.length;
+        posPrev = new Float32Array(interpLen);
+        posCur = new Float32Array(interpLen);
+        posLerp = new Float32Array(interpLen);
+      }
+      posPrev.set(before);
       world.step(FIXED);
       acc -= FIXED;
+      posCur.set(positions());
     }
   }
+  interpAlpha = acc / FIXED; // leftover fraction toward the next (unrun) step
   // Barely-perceptible parallax on the star shell (skipped under reduce-motion).
   if (stars && !document.body.classList.contains('reduce-motion')) {
     stars.rotation.y = now * 0.00001;
@@ -979,7 +1594,165 @@ function schedule() {
   }
 }
 
-loadSim('collisions'); // build the initial sim + scene
+// --- state persistence: shareable URL hash + localStorage -------------------
+// One compact snapshot of the user-facing controls, written to the location hash
+// (shareable) and localStorage (sticky across visits). Only keys relevant to the
+// active sim are included. loadSim() reads this same shape back via its `restore`
+// argument, so a shared link or a return visit reopens with the exact settings.
+const LS_KEY = 'physics-sandbox-state';
+let restoring = false; // true while applying persisted state — suppresses re-persist
+let persistTimer = 0;
+
+function currentState() {
+  const st = { sim: simKey, n: parseInt(countSlider.value, 10), spd: speed };
+  if (cfg.hasGravityParam) st.g = parseFloat(gravSlider.value);
+  if (cfg.hasWind) st.w = parseFloat(windSlider.value);
+  if (cfg.hasPin) st.pin = pinMode;
+  if (cfg.contour) {
+    st.land = landscapeIdx;
+    st.opt = optimizerIdx;
+    if (cfg.hasBeta) st.beta = betaVal;
+  }
+  if (simHasVel) {
+    st.arr = arrowsOn ? 1 : 0;
+    st.trl = trailsOn ? 1 : 0;
+  }
+  if (cfg.colorBySpeed) st.cmap = colormapIdx;
+  return st;
+}
+
+function writeHash() {
+  const hash = '#' + Object.entries(currentState()).map(([k, v]) => `${k}=${v}`).join('&');
+  // replaceState avoids spamming browser history (and doesn't fire hashchange).
+  history.replaceState(null, '', hash);
+}
+
+function saveLocal() {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(currentState()));
+  } catch {
+    /* storage unavailable (private mode / quota) — non-fatal */
+  }
+}
+
+// Debounced: a slider drag fires many input events; persist once it settles.
+function schedulePersist() {
+  if (restoring) return;
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    writeHash();
+    saveLocal();
+  }, 250);
+}
+
+// Parse a snapshot from the hash (k=v&...) or a localStorage JSON string. Returns
+// null unless it names a known sim, so a malformed/foreign source is ignored.
+function parseState(raw, fromHash) {
+  if (!raw) return null;
+  let st = null;
+  if (fromHash) {
+    st = {};
+    for (const part of raw.replace(/^#/, '').split('&')) {
+      if (!part) continue;
+      const [k, v] = part.split('=');
+      if (k === 'sim') st.sim = v;
+      else if (v !== undefined && v !== '') st[k] = Number(v);
+    }
+  } else {
+    try {
+      st = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  return st && st.sim && SIMS[st.sim] ? st : null;
+}
+
+function loadLocal() {
+  try {
+    return parseState(localStorage.getItem(LS_KEY), false);
+  } catch {
+    return null;
+  }
+}
+
+// Re-apply state when the hash is edited/navigated in an already-open tab.
+// (writeHash uses replaceState, which doesn't fire this — so no feedback loop.)
+window.addEventListener('hashchange', () => {
+  const st = parseState(location.hash, true);
+  if (!st) return;
+  restoring = true;
+  loadSim(st.sim, st);
+  restoring = false;
+});
+
+// --- keyboard shortcuts -----------------------------------------------------
+// space=pause, R=reset, F=fullscreen, S=screenshot, 1-N=sims. Ignored while
+// typing in a control, with a modal open, or with a modifier held.
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (!modalAbout.hidden || !modalSettings.hidden) return;
+
+  if (e.key >= '1' && e.key <= '9') {
+    const seg = segBtns[parseInt(e.key, 10) - 1];
+    if (seg) loadSim(seg.dataset.sim);
+    return;
+  }
+  switch (e.key) {
+    case ' ': // space toggles pause globally (preventDefault stops page scroll)
+      e.preventDefault();
+      btnPause.click();
+      break;
+    case 'r':
+    case 'R':
+      document.getElementById('btn-reset').click();
+      break;
+    case 'f':
+    case 'F':
+      btnFull.click();
+      break;
+    case 's':
+    case 'S':
+      e.preventDefault();
+      captureScreenshot();
+      break;
+    case 'a':
+    case 'A':
+      if (simHasVel) btnArrows.click(); // velocity arrows
+      break;
+    case 't':
+    case 'T':
+      if (simHasVel) btnTrails.click(); // fading trails
+      break;
+  }
+});
+
+// --- screenshot (PNG download) ----------------------------------------------
+// Render the current frame, then snapshot the canvas. preserveDrawingBuffer (set
+// on the renderer) keeps the buffer readable here.
+function captureScreenshot() {
+  render();
+  renderer.domElement.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `physics-${simKey}-${Date.now()}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, 'image/png');
+}
+
+// Boot at the persisted state if any (URL hash wins over localStorage), else the
+// default sim. restoring=true keeps boot from rewriting a clean URL.
+const bootState = parseState(location.hash, true) || loadLocal();
+restoring = true;
+loadSim(bootState ? bootState.sim : 'collisions', bootState); // build the initial sim + scene
+restoring = false;
 render(); // paint the first frame before the loop ticks
 schedule();
 
@@ -1134,7 +1907,240 @@ if (import.meta.env.DEV) {
         maxSpeed,
         spreadXY,
         extraLen: ex.length,
+        gridLen: world.grid_len(),
+        gridDim: world.grid_dim(),
         first: [p[0], p[1], p[2]],
+      };
+    },
+    // Advance the gradient-descent sim and report convergence: best-walker loss
+    // at start vs end, the largest single-step rise in best-loss (should be ~0),
+    // the best walker's world position, and the heatmap metadata.
+    descent(steps = 200) {
+      const bestLoss = () => {
+        const e = extra();
+        let m = Infinity;
+        for (let i = 0; i < e.length; i++) if (e[i] < m) m = e[i];
+        return m;
+      };
+      const startBest = bestLoss();
+      let prevBest = startBest;
+      let maxIncrease = 0;
+      for (let s = 0; s < steps; s++) {
+        world.step(FIXED);
+        const b = bestLoss();
+        if (b - prevBest > maxIncrease) maxIncrease = b - prevBest;
+        prevBest = b;
+      }
+      render();
+      const exF = extra();
+      let finalBest = Infinity;
+      let bestIdx = 0;
+      for (let i = 0; i < exF.length; i++) {
+        if (exF[i] < finalBest) {
+          finalBest = exF[i];
+          bestIdx = i;
+        }
+      }
+      const p = positions();
+      let nan = false;
+      for (let i = 0; i < count * 3; i++) if (!Number.isFinite(p[i])) nan = true;
+      return {
+        sim: simKey,
+        landscape: landscapeIdx,
+        optimizer: optimizerIdx,
+        startBest,
+        finalBest,
+        maxIncrease,
+        bestWorld: [p[bestIdx * 3], p[bestIdx * 3 + 1], p[bestIdx * 3 + 2]],
+        gridLen: world.grid_len(),
+        gridDim: world.grid_dim(),
+        lossMin: world.loss_min(),
+        lossMax: world.loss_max(),
+        nan,
+      };
+    },
+    // Heatmap + trail diagnostics: texel spread (non-uniform?), and the largest
+    // trail segment right after a prime (should be ~0 → no teleport streak).
+    contour() {
+      if (!contourData) return { hasContour: false };
+      let lumMin = 255;
+      let lumMax = 0;
+      const seen = new Set();
+      for (let i = 0; i < contourData.length; i += 4) {
+        const l = contourData[i];
+        if (l < lumMin) lumMin = l;
+        if (l > lumMax) lumMax = l;
+        seen.add(l);
+      }
+      let maxSeg = 0;
+      if (trailPos) {
+        for (let o = 0; o < trailPos.length; o += 6) {
+          const dx = trailPos[o + 3] - trailPos[o];
+          const dz = trailPos[o + 5] - trailPos[o + 2];
+          const d = Math.hypot(dx, dz);
+          if (d > maxSeg) maxSeg = d;
+        }
+      }
+      return { hasContour: true, texelMin: lumMin, texelMax: lumMax, distinctLum: seen.size, maxTrailSeg: maxSeg };
+    },
+    setLandscape(i) {
+      landscapeIdx = i;
+      world.set_param(1, i);
+      refreshContourTexture();
+      primeTrails();
+    },
+    setOptimizer(i) {
+      optimizerIdx = i;
+      world.set_param(2, i);
+      primeTrails();
+    },
+    // Advance the boids flock and report emergent alignment via the velocity
+    // polarization order parameter Φ = |Σ v̂_i| / N (≈0 incoherent, →1 a single
+    // aligned flock), measured at start vs end. Headings come from position
+    // deltas (velocities aren't exposed to JS). Plus in-bounds + NaN checks.
+    boids(steps = 240) {
+      const polarization = () => {
+        const a = positions().slice(); // copy: the live view mutates on step
+        world.step(FIXED);
+        const b = positions();
+        let sx = 0;
+        let sy = 0;
+        let sz = 0;
+        let used = 0;
+        for (let i = 0; i < count; i++) {
+          const dx = b[i * 3] - a[i * 3];
+          const dy = b[i * 3 + 1] - a[i * 3 + 1];
+          const dz = b[i * 3 + 2] - a[i * 3 + 2];
+          const d = Math.hypot(dx, dy, dz);
+          if (d > 1e-6) {
+            sx += dx / d;
+            sy += dy / d;
+            sz += dz / d;
+            used++;
+          }
+        }
+        return used ? Math.hypot(sx, sy, sz) / used : 0;
+      };
+      const startPhi = polarization(); // consumes 1 step
+      for (let s = 0; s < steps; s++) world.step(FIXED);
+      const endPhi = polarization(); // consumes 1 step
+      render();
+      const p = positions();
+      let nan = false;
+      let maxAbs = 0;
+      for (let i = 0; i < count * 3; i++) {
+        if (!Number.isFinite(p[i])) nan = true;
+        const av = Math.abs(p[i]);
+        if (av > maxAbs) maxAbs = av;
+      }
+      const ex = extra();
+      let minSpeed = Infinity;
+      let maxSpeed = 0;
+      for (let i = 0; i < ex.length; i++) {
+        if (ex[i] < minSpeed) minSpeed = ex[i];
+        if (ex[i] > maxSpeed) maxSpeed = ex[i];
+      }
+      return {
+        sim: simKey,
+        count,
+        startPhi,
+        endPhi,
+        bounds: simBounds,
+        maxAbs,
+        inBounds: maxAbs <= simBounds + 1e-3,
+        minSpeed,
+        maxSpeed,
+        nan,
+      };
+    },
+    // Visualization-overlay diagnostics: which overlays exist/are shown for the
+    // active sim, their geometry sizes, and the selected colour map.
+    viz() {
+      return {
+        sim: simKey,
+        hasVel: simHasVel,
+        velLen: world.vel_len(),
+        colorBySpeed: !!cfg.colorBySpeed,
+        arrowsOn,
+        trailsOn,
+        colormap: colormapIdx,
+        colormapName: COLORMAPS[colormapIdx]?.name,
+        colormapCount: COLORMAPS.length,
+        arrowVisible: !!(arrowLines && arrowLines.visible),
+        arrowVerts: arrowGeo ? arrowGeo.attributes.position.count : 0,
+        trailVisible: !!(trailLines && trailLines.visible),
+        trailVerts: trailGeo ? trailGeo.attributes.position.count : 0,
+        trailFlat,
+        trailLen,
+      };
+    },
+    setArrows(on) {
+      arrowsOn = !!on;
+      if (arrowLines) arrowLines.visible = arrowsOn;
+      render();
+    },
+    setTrails(on) {
+      trailsOn = !!on;
+      if (trailLines) {
+        trailLines.visible = trailsOn;
+        if (trailsOn) primeTrails();
+      }
+      render();
+    },
+    setColormap(i) {
+      colormapIdx = i | 0;
+      render();
+    },
+    // Largest arrow length and trail segment currently drawn (NaN/extent checks).
+    vizSample() {
+      let maxArrow = 0;
+      if (arrowPos && arrowLines && arrowLines.visible) {
+        for (let o = 0; o < arrowPos.length; o += 6) {
+          const dx = arrowPos[o + 3] - arrowPos[o];
+          const dy = arrowPos[o + 4] - arrowPos[o + 1];
+          const dz = arrowPos[o + 5] - arrowPos[o + 2];
+          const d = Math.hypot(dx, dy, dz);
+          if (d > maxArrow) maxArrow = d;
+        }
+      }
+      let maxTrailSeg = 0;
+      if (trailPos && trailLines && trailLines.visible) {
+        for (let o = 0; o < trailPos.length; o += 6) {
+          const dx = trailPos[o + 3] - trailPos[o];
+          const dy = trailPos[o + 4] - trailPos[o + 1];
+          const dz = trailPos[o + 5] - trailPos[o + 2];
+          const d = Math.hypot(dx, dy, dz);
+          if (d > maxTrailSeg) maxTrailSeg = d;
+        }
+      }
+      return { maxArrow, maxTrailSeg };
+    },
+    interp(idx = 0) {
+      // Prove the frame-interpolation snapshots capture motion and the lerp lands
+      // between them (smoothing math), and that the current state has no NaN.
+      const len = interpLen;
+      if (!len || !posPrev || !posCur) return { len, alpha: interpAlpha, ready: false };
+      const i = Math.min(Math.max(idx, 0) * 3, len - 3);
+      const a = interpAlpha < 0 ? 0 : interpAlpha > 1 ? 1 : interpAlpha;
+      const lerpX = posPrev[i] * (1 - a) + posCur[i] * a;
+      const lo = Math.min(posPrev[i], posCur[i]) - 1e-6;
+      const hi = Math.max(posPrev[i], posCur[i]) + 1e-6;
+      let nan = false;
+      for (let k = 0; k < len; k++)
+        if (!Number.isFinite(posCur[k])) {
+          nan = true;
+          break;
+        }
+      return {
+        len,
+        alpha: a,
+        prevX: posPrev[i],
+        curX: posCur[i],
+        lerpX,
+        moved: Math.abs(posCur[i] - posPrev[i]),
+        between: lerpX >= lo && lerpX <= hi,
+        nan,
+        ready: true,
       };
     },
   };

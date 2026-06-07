@@ -54,3 +54,21 @@ export function makeExtra(world) {
     () => world.extra_len(),
   );
 }
+
+// Live view over the sim's optional flat [vx,vy,vz,...] velocity buffer, used to
+// draw velocity arrows. Empty for sims without cartesian velocities.
+export function makeVelocities(world) {
+  return makeFloatView(
+    () => world.vel_ptr(),
+    () => world.vel_len(),
+  );
+}
+
+// Live view over the gradient-descent sim's loss-landscape heatmap field
+// (GRID_N*GRID_N samples, row-major). Empty for every other sim.
+export function makeGrid(world) {
+  return makeFloatView(
+    () => world.grid_ptr(),
+    () => world.grid_len(),
+  );
+}

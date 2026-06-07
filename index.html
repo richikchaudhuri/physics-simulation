@@ -140,6 +140,15 @@
 
         <section class="panel" aria-label="Simulation controls">
           <div class="panel__body">
+            <nav class="seg" id="sim-switch" aria-label="Choose simulation">
+              <button class="seg__btn is-active" data-sim="collisions">Collisions</button>
+              <button class="seg__btn" data-sim="gravity">Gravity</button>
+              <button class="seg__btn" data-sim="pendulum">Pendulum</button>
+              <button class="seg__btn" data-sim="cloth">Cloth</button>
+              <button class="seg__btn" data-sim="descent" style="grid-column: 1 / -1">Gradient Descent</button>
+              <button class="seg__btn" data-sim="boids" style="grid-column: 1 / -1">Boids (Flocking)</button>
+            </nav>
+
             <div class="stats">
               <div class="stat"><span class="stat__label">Bodies</span><span class="stat__val" id="stat-count">&mdash;</span></div>
               <div class="stat"><span class="stat__label">FPS</span><span class="stat__val" id="stat-fps">&mdash;</span></div>
@@ -162,6 +171,22 @@
                 <label for="wind-slider"><span id="wind-name">Wind</span> <span class="control__val" id="wind-label">6.0</span></label>
                 <input id="wind-slider" type="range" min="0" max="30" step="0.5" value="6" />
               </div>
+              <div class="control" id="landscape-row" style="display: none">
+                <label>Landscape</label>
+                <nav class="select" id="landscape-nav" aria-label="Choose loss landscape"></nav>
+              </div>
+              <div class="control" id="optimizer-row" style="display: none">
+                <label>Optimizer</label>
+                <nav class="select" id="optimizer-nav" aria-label="Choose optimizer"></nav>
+              </div>
+              <div class="control" id="beta-row" style="display: none">
+                <label for="beta-slider">Momentum &beta; <span class="control__val" id="beta-label">0.90</span></label>
+                <input id="beta-slider" type="range" min="0" max="0.999" step="0.001" value="0.9" />
+              </div>
+              <div class="control" id="colormap-row" style="display: none">
+                <label>Colour map</label>
+                <nav class="select" id="colormap-nav" aria-label="Choose speed colour map"></nav>
+              </div>
             </div>
 
             <div class="actions">
@@ -182,6 +207,15 @@
                 <span class="ico"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg></span>
                 <span class="lbl">Reset View</span>
               </button>
+              <button id="btn-arrows" class="btn" style="display: none" title="Toggle velocity arrows (A)">
+                <span class="ico"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 19 19 5"/><path d="M10 5h9v9"/></svg></span>
+                <span class="lbl">Arrows</span>
+              </button>
+              <button id="btn-trails" class="btn" style="display: none" title="Toggle motion trails (T)">
+                <span class="ico"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="6" r="2"/><path d="M14 8c-3 3-6 4-11 4"/></svg></span>
+                <span class="lbl">Trails</span>
+              </button>
+              <button id="btn-pin" class="btn btn--wide" style="display: none">
             </div>
 
             <div class="pin-wrap collapsible is-collapsed">
