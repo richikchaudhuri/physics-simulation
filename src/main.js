@@ -454,8 +454,17 @@ function positionHL(nav, btns, hl, activeIdx) {
     (parseFloat(bcs.borderLeftWidth) || 0) +
     (parseFloat(bcs.borderRightWidth) || 0);
   const lbl = active.querySelector('.lbl');
-  const labelW = lbl ? lbl.scrollWidth : 0; // natural width regardless of clip
-  const left = padL + activeIdx * (iconW + gap);
+  // The label keeps its icon↔text padding even when clipped to zero width
+  // (overflow:hidden doesn't clip padding), so every collapsed pill is really
+  // iconW + that padding wide. Fold it into the per-index stride, or the
+  // highlighter drifts left of the active pill by paddingLeft × index.
+  const lblCS = lbl ? getComputedStyle(lbl) : null;
+  const lblPad = lblCS
+    ? (parseFloat(lblCS.paddingLeft) || 0) + (parseFloat(lblCS.paddingRight) || 0)
+    : 0;
+  const collapsedW = iconW + lblPad; // true icon-only pill width
+  const labelW = lbl ? lbl.scrollWidth : 0; // natural width (incl. padding) regardless of clip
+  const left = padL + activeIdx * (collapsedW + gap);
   hl.style.transform = `translate(${left}px, ${padT}px)`;
   hl.style.width = `${iconW + labelW}px`;
   hl.style.height = `${active.offsetHeight}px`;
