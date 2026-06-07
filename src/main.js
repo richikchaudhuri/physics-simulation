@@ -156,6 +156,31 @@ const SIMS = {
     camTarget: new THREE.Vector3(0, 0, 0),
     hint: 'Optimizers race down a loss landscape · pick a function & optimizer · left-drag to orbit',
   },
+  boids: {
+    kind: 5,
+    accent: '#e8718d', // rose — a lively flock against the cool sims
+    defaultCount: 180,
+    minCount: 30,
+    maxCount: 400, // naive O(n^2) neighbour search stays smooth to a few hundred
+    countName: 'Boids',
+    boxed: false, // open 3D space; boids softly turn back from invisible bounds
+    showGrid: false,
+    colorBySpeed: true, // tint by speed (warm = fast)
+    speedScale: 2.8, // boids settle into a tight cruise band — compress so the ramp still spreads
+    centralScale: 1,
+    grabbable: false, // boids are autonomous; left-drag always orbits
+    rods: false,
+    // The shared "gravity" slider drives cohesion strength (set_param id 0): how
+    // hard boids steer toward their local flockmates' centre of mass.
+    hasGravityParam: true,
+    gravLabel: 'Cohesion',
+    gravMin: 0,
+    gravMax: 3,
+    gravStep: 0.1,
+    gravDefault: 1,
+    camPos: new THREE.Vector3(13, 9, 18),
+    hint: 'Emergent flocking from three local rules — separation, alignment, cohesion · left-drag to orbit',
+  },
 };
 
 let simKey = 'collisions';
@@ -1530,6 +1555,65 @@ if (import.meta.env.DEV) {
       optimizerIdx = i;
       world.set_param(2, i);
       primeTrails();
+    },
+    // Advance the boids flock and report emergent alignment via the velocity
+    // polarization order parameter Φ = |Σ v̂_i| / N (≈0 incoherent, →1 a single
+    // aligned flock), measured at start vs end. Headings come from position
+    // deltas (velocities aren't exposed to JS). Plus in-bounds + NaN checks.
+    boids(steps = 240) {
+      const polarization = () => {
+        const a = positions().slice(); // copy: the live view mutates on step
+        world.step(FIXED);
+        const b = positions();
+        let sx = 0;
+        let sy = 0;
+        let sz = 0;
+        let used = 0;
+        for (let i = 0; i < count; i++) {
+          const dx = b[i * 3] - a[i * 3];
+          const dy = b[i * 3 + 1] - a[i * 3 + 1];
+          const dz = b[i * 3 + 2] - a[i * 3 + 2];
+          const d = Math.hypot(dx, dy, dz);
+          if (d > 1e-6) {
+            sx += dx / d;
+            sy += dy / d;
+            sz += dz / d;
+            used++;
+          }
+        }
+        return used ? Math.hypot(sx, sy, sz) / used : 0;
+      };
+      const startPhi = polarization(); // consumes 1 step
+      for (let s = 0; s < steps; s++) world.step(FIXED);
+      const endPhi = polarization(); // consumes 1 step
+      render();
+      const p = positions();
+      let nan = false;
+      let maxAbs = 0;
+      for (let i = 0; i < count * 3; i++) {
+        if (!Number.isFinite(p[i])) nan = true;
+        const av = Math.abs(p[i]);
+        if (av > maxAbs) maxAbs = av;
+      }
+      const ex = extra();
+      let minSpeed = Infinity;
+      let maxSpeed = 0;
+      for (let i = 0; i < ex.length; i++) {
+        if (ex[i] < minSpeed) minSpeed = ex[i];
+        if (ex[i] > maxSpeed) maxSpeed = ex[i];
+      }
+      return {
+        sim: simKey,
+        count,
+        startPhi,
+        endPhi,
+        bounds: simBounds,
+        maxAbs,
+        inBounds: maxAbs <= simBounds + 1e-3,
+        minSpeed,
+        maxSpeed,
+        nan,
+      };
     },
   };
 }
