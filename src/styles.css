@@ -15,6 +15,7 @@
   --faint-3: rgba(255, 255, 255, 0.09); /* button hover fill */
   --panel-bg: rgba(10, 11, 15, 0.5);
   --accent: #6ca0ff; /* overridden per-sim in JS */
+  --line: rgba(255, 255, 255, 0.82); /* white framing border on UI boxes */
 
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
@@ -142,6 +143,7 @@ body {
 .panel {
   pointer-events: auto;
   width: 264px;
+  border: 1px solid var(--line);
   background: var(--panel-bg);
   backdrop-filter: blur(16px) saturate(118%);
   -webkit-backdrop-filter: blur(16px) saturate(118%);
@@ -160,7 +162,7 @@ body {
 .wordmark {
   font-family: var(--font-display);
   font-weight: 400;
-  font-size: 27px;
+  font-size: 31px;
   line-height: 1.05;
   letter-spacing: 0.01em;
   color: var(--ink);
@@ -168,7 +170,7 @@ body {
 
 .sub {
   margin-top: 8px;
-  font-size: 9.5px;
+  font-size: 10.5px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.26em;
@@ -184,13 +186,13 @@ body {
 
 .seg__btn {
   background: transparent;
-  border: none;
+  border: 1px solid var(--line);
   color: var(--muted);
   font: inherit;
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.06em;
-  padding: 9px 6px;
+  padding: 10px 6px;
   cursor: pointer;
   border-radius: 2px;
   transition:
@@ -223,7 +225,7 @@ body {
 }
 
 .stat__label {
-  font-size: 9px;
+  font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.22em;
   color: var(--muted);
@@ -231,7 +233,7 @@ body {
 
 .stat__val {
   font-family: var(--font-mono);
-  font-size: 17px;
+  font-size: 19px;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
 }
@@ -249,7 +251,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  font-size: 10px;
+  font-size: 11.5px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.16em;
@@ -258,7 +260,7 @@ body {
 
 .control__val {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12.5px;
   letter-spacing: 0;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
@@ -342,13 +344,13 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 
 .select__btn {
   background: var(--faint-2);
-  border: none;
+  border: 1px solid var(--line);
   color: var(--muted);
   font: inherit;
-  font-size: 10px;
+  font-size: 11.5px;
   font-weight: 500;
   letter-spacing: 0.04em;
-  padding: 8px 4px;
+  padding: 9px 4px;
   cursor: pointer;
   border-radius: 2px;
   transition:
@@ -364,7 +366,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .select__btn.is-active {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--ink);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+  border-color: var(--accent);
 }
 
 /* --- action buttons ------------------------------------------------------- */
@@ -380,12 +382,12 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   background: var(--faint-2);
   border: none;
   color: var(--ink);
-  padding: 11px 8px;
+  padding: 12px 8px;
   font: inherit;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
+  text-transform: lowercase;
+  letter-spacing: 0.06em;
   cursor: pointer;
   border-radius: 2px;
   transition:
@@ -408,7 +410,6 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 
 .btn--ghost {
   background: transparent;
-  box-shadow: inset 0 0 0 1px var(--faint);
 }
 
 .btn--ghost:hover {
@@ -419,17 +420,18 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .btn.is-on {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 /* --- bottom hint ---------------------------------------------------------- */
 .hint {
   align-self: center;
   pointer-events: none;
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--muted);
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  border: 1px solid var(--line);
   background: rgba(8, 8, 10, 0.4);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
@@ -500,11 +502,11 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   }
 
   .wordmark {
-    font-size: 23px;
+    font-size: 26px;
   }
 
   .hint {
-    font-size: 9px;
+    font-size: 10.5px;
     padding: 7px 12px;
     text-align: center;
   }
