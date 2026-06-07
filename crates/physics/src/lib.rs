@@ -25,6 +25,12 @@ pub trait Simulation {
     fn extra(&self) -> &[f32] {
         &[]
     }
+    /// Optional flat `[vx, vy, vz, ...]` velocity buffer (3 per body), used by JS
+    /// to draw velocity arrows. Empty when the sim has no cartesian velocities
+    /// (e.g. the angle-driven pendulum or the optimizer-driven walkers).
+    fn velocities(&self) -> &[f32] {
+        &[]
+    }
     /// Tunable parameter hook; the meaning of `id` is per-sim (e.g. 0 = G).
     fn set_param(&mut self, _id: u32, _v: f32) {}
     /// Optional scalar field sampled on a square grid (row-major), used by the
@@ -352,6 +358,9 @@ impl Simulation for Bouncer {
     fn extra(&self) -> &[f32] {
         &self.speed
     }
+    fn velocities(&self) -> &[f32] {
+        &self.vel
+    }
     fn set_param(&mut self, id: u32, v: f32) {
         if id == 0 {
             // v is a gravity multiplier (1.0 = Earth gravity, 0 = weightless).
@@ -538,6 +547,9 @@ impl Simulation for NBody {
     }
     fn extra(&self) -> &[f32] {
         &self.speed
+    }
+    fn velocities(&self) -> &[f32] {
+        &self.vel
     }
     fn set_param(&mut self, id: u32, v: f32) {
         if id == 0 {
@@ -1295,6 +1307,289 @@ impl Simulation for GradientDescent {
     }
 }
 
+/// Reynolds steering: turn a boid's velocity toward a `desired` direction. Returns
+/// the acceleration that nudges the current velocity `v` toward a velocity of
+/// magnitude `max_speed` pointing along `d`, capped at `max_force`. A zero-length
+/// `d` yields no steer (the rule had no opinion this frame).
+#[inline]
+fn steer_toward(
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    vx: f32,
+    vy: f32,
+    vz: f32,
+    max_speed: f32,
+    max_force: f32,
+) -> (f32, f32, f32) {
+    let dn = (dx * dx + dy * dy + dz * dz).sqrt();
+    if dn < 1e-6 {
+        return (0.0, 0.0, 0.0);
+    }
+    let s = max_speed / dn;
+    // desired velocity (along d, at cruise speed) minus current velocity
+    let mut fx = dx * s - vx;
+    let mut fy = dy * s - vy;
+    let mut fz = dz * s - vz;
+    let fmag = (fx * fx + fy * fy + fz * fz).sqrt();
+    if fmag > max_force {
+        let t = max_force / fmag;
+        fx *= t;
+        fy *= t;
+        fz *= t;
+    }
+    (fx, fy, fz)
+}
+
+/// Sim #5: Reynolds boids (flocking). Each boid steers by three local rules over a
+/// perception radius — separation (avoid crowding), alignment (match neighbours'
+/// heading) and cohesion (steer toward the local centre of mass) — and the flock
+/// emerges with no global control. Neighbour search is the naive O(n^2) (ample for
+/// a few hundred boids); steering is accumulated into a reused `acc` buffer so a
+/// step makes no heap allocation. Boids roam a 3D box and ease back from the walls
+/// via a soft boundary spring so the flock stays in frame.
+struct Boids {
+    pos: Vec<f32>,
+    vel: Vec<f32>,
+    acc: Vec<f32>,   // steering accel for the current step (reused, no per-step alloc)
+    speed: Vec<f32>, // per-boid |v|, exposed via extra() for color
+    n: usize,
+    bounds: f32,
+    radius: f32,
+    perception: f32, // neighbour radius for alignment + cohesion
+    sep_radius: f32, // separation only kicks in closer than this
+    max_speed: f32,
+    min_speed: f32, // boids cruise — never stall to a stop
+    max_force: f32, // per-rule steering cap
+    sep_w: f32,
+    ali_w: f32,
+    coh_w: f32,
+    seed_val: u32,
+}
+
+impl Boids {
+    fn new(n: usize) -> Self {
+        let n = n.clamp(1, 4096);
+        let mut s = Self {
+            pos: vec![0.0; n * 3],
+            vel: vec![0.0; n * 3],
+            acc: vec![0.0; n * 3],
+            speed: vec![0.0; n],
+            n,
+            bounds: 7.0,
+            radius: 0.11,
+            perception: 3.0,
+            sep_radius: 1.2,
+            max_speed: 4.0,
+            min_speed: 1.8,
+            max_force: 6.0,
+            sep_w: 1.5,
+            ali_w: 1.2,
+            coh_w: 1.0,
+            seed_val: 0x515F_00D5,
+        };
+        s.seed();
+        s
+    }
+
+    /// Deterministically scatter boids through the inner box with random headings,
+    /// all at the same cruising speed, and clear the steering accumulator.
+    fn seed(&mut self) {
+        let b = self.bounds * 0.6;
+        let mut rng = Rng::new(self.seed_val);
+        let tau = std::f32::consts::TAU;
+        let sp = self.max_speed * 0.75;
+        for i in 0..self.n {
+            let k = i * 3;
+            self.pos[k] = rng.range(-b, b);
+            self.pos[k + 1] = rng.range(-b, b);
+            self.pos[k + 2] = rng.range(-b, b);
+            // Uniform-ish direction on the sphere (phi = acos of a uniform cosine).
+            let theta = rng.range(0.0, tau);
+            let phi = rng.range(-1.0, 1.0).acos();
+            self.vel[k] = sp * phi.sin() * theta.cos();
+            self.vel[k + 1] = sp * phi.cos();
+            self.vel[k + 2] = sp * phi.sin() * theta.sin();
+            self.speed[i] = sp;
+        }
+        for a in self.acc.iter_mut() {
+            *a = 0.0;
+        }
+    }
+}
+
+impl Simulation for Boids {
+    fn step(&mut self, dt: f32) {
+        let n = self.n;
+        let per2 = self.perception * self.perception;
+        let sep2 = self.sep_radius * self.sep_radius;
+        let max_speed = self.max_speed;
+        let max_force = self.max_force;
+
+        // Pass 1: read current pos/vel, accumulate each boid's steering into acc.
+        // (Synchronous update — every boid sees the same snapshot, so flock motion
+        // doesn't depend on iteration order.)
+        for i in 0..n {
+            let ki = i * 3;
+            let xi = self.pos[ki];
+            let yi = self.pos[ki + 1];
+            let zi = self.pos[ki + 2];
+            let vxi = self.vel[ki];
+            let vyi = self.vel[ki + 1];
+            let vzi = self.vel[ki + 2];
+
+            let (mut sx, mut sy, mut sz) = (0.0f32, 0.0f32, 0.0f32); // separation dir
+            let (mut avx, mut avy, mut avz) = (0.0f32, 0.0f32, 0.0f32); // summed neighbour vel
+            let (mut cx, mut cy, mut cz) = (0.0f32, 0.0f32, 0.0f32); // summed neighbour pos
+            let mut n_flock = 0u32;
+
+            for j in 0..n {
+                if j == i {
+                    continue;
+                }
+                let kj = j * 3;
+                let dx = xi - self.pos[kj];
+                let dy = yi - self.pos[kj + 1];
+                let dz = zi - self.pos[kj + 2];
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 < per2 {
+                    avx += self.vel[kj];
+                    avy += self.vel[kj + 1];
+                    avz += self.vel[kj + 2];
+                    cx += self.pos[kj];
+                    cy += self.pos[kj + 1];
+                    cz += self.pos[kj + 2];
+                    n_flock += 1;
+                    if d2 < sep2 && d2 > 1e-6 {
+                        // Push away, weighted by 1/d so the nearest boids dominate.
+                        let w = 1.0 / d2; // = (1/d) * (1/d): direction scaled by 1/d
+                        sx += dx * w;
+                        sy += dy * w;
+                        sz += dz * w;
+                    }
+                }
+            }
+
+            let (mut fx, mut fy, mut fz) = (0.0f32, 0.0f32, 0.0f32);
+            if n_flock > 0 {
+                let inv = 1.0 / n_flock as f32;
+                // Alignment: match the average heading of neighbours.
+                let (ax, ay, az) =
+                    steer_toward(avx * inv, avy * inv, avz * inv, vxi, vyi, vzi, max_speed, max_force);
+                fx += self.ali_w * ax;
+                fy += self.ali_w * ay;
+                fz += self.ali_w * az;
+                // Cohesion: steer toward the neighbours' centre of mass.
+                let (gx, gy, gz) = steer_toward(
+                    cx * inv - xi,
+                    cy * inv - yi,
+                    cz * inv - zi,
+                    vxi,
+                    vyi,
+                    vzi,
+                    max_speed,
+                    max_force,
+                );
+                fx += self.coh_w * gx;
+                fy += self.coh_w * gy;
+                fz += self.coh_w * gz;
+            }
+            // Separation: steer directly away from crowding neighbours.
+            let (rx, ry, rz) = steer_toward(sx, sy, sz, vxi, vyi, vzi, max_speed, max_force);
+            fx += self.sep_w * rx;
+            fy += self.sep_w * ry;
+            fz += self.sep_w * rz;
+
+            self.acc[ki] = fx;
+            self.acc[ki + 1] = fy;
+            self.acc[ki + 2] = fz;
+        }
+
+        // Pass 2: integrate — apply steering, turn back from the walls, clamp speed,
+        // advance. A soft boundary spring (engaged past `margin`) turns boids around
+        // before they reach the box; the hard clamp is a backstop / NaN guard only.
+        let margin = self.bounds * 0.75;
+        let wall_k = self.max_force * 2.0;
+        let min_speed = self.min_speed;
+        let b = self.bounds;
+        for i in 0..n {
+            let k = i * 3;
+            let mut vx = self.vel[k] + self.acc[k] * dt;
+            let mut vy = self.vel[k + 1] + self.acc[k + 1] * dt;
+            let mut vz = self.vel[k + 2] + self.acc[k + 2] * dt;
+
+            if self.pos[k] > margin {
+                vx -= wall_k * (self.pos[k] - margin) * dt;
+            } else if self.pos[k] < -margin {
+                vx += wall_k * (-margin - self.pos[k]) * dt;
+            }
+            if self.pos[k + 1] > margin {
+                vy -= wall_k * (self.pos[k + 1] - margin) * dt;
+            } else if self.pos[k + 1] < -margin {
+                vy += wall_k * (-margin - self.pos[k + 1]) * dt;
+            }
+            if self.pos[k + 2] > margin {
+                vz -= wall_k * (self.pos[k + 2] - margin) * dt;
+            } else if self.pos[k + 2] < -margin {
+                vz += wall_k * (-margin - self.pos[k + 2]) * dt;
+            }
+
+            // Keep boids cruising within [min_speed, max_speed].
+            let sp = (vx * vx + vy * vy + vz * vz).sqrt();
+            if sp > 1e-6 {
+                let target = sp.clamp(min_speed, max_speed);
+                let t = target / sp;
+                vx *= t;
+                vy *= t;
+                vz *= t;
+                self.speed[i] = target;
+            } else {
+                self.speed[i] = 0.0;
+            }
+
+            self.vel[k] = vx;
+            self.vel[k + 1] = vy;
+            self.vel[k + 2] = vz;
+            self.pos[k] = (self.pos[k] + vx * dt).clamp(-b, b);
+            self.pos[k + 1] = (self.pos[k + 1] + vy * dt).clamp(-b, b);
+            self.pos[k + 2] = (self.pos[k + 2] + vz * dt).clamp(-b, b);
+        }
+    }
+    fn positions(&self) -> &[f32] {
+        &self.pos
+    }
+    fn reset(&mut self) {
+        // Re-seed positions/headings but PRESERVE the user's rule weights (which are
+        // bound to a UI slider), so a reset re-scatters the flock without snapping
+        // the controls back to defaults.
+        self.seed();
+    }
+    fn count(&self) -> usize {
+        self.n
+    }
+    fn radius(&self) -> f32 {
+        self.radius
+    }
+    fn bounds(&self) -> f32 {
+        self.bounds
+    }
+    fn extra(&self) -> &[f32] {
+        &self.speed
+    }
+    fn velocities(&self) -> &[f32] {
+        &self.vel
+    }
+    fn set_param(&mut self, id: u32, v: f32) {
+        match id {
+            0 => self.coh_w = v.max(0.0),          // cohesion (UI slider)
+            1 => self.ali_w = v.max(0.0),          // alignment
+            2 => self.sep_w = v.max(0.0),          // separation
+            3 => self.perception = v.clamp(0.3, 6.0),
+            _ => {}
+        }
+    }
+}
+
 /// The single concrete type that crosses the wasm-bindgen boundary. It owns a
 /// trait object so JS only ever talks to `World`, while Rust swaps the sim behind it.
 #[wasm_bindgen]
@@ -1312,6 +1607,7 @@ impl World {
             2 => Box::new(DoublePendulum::new(n)),
             3 => Box::new(Cloth::new(n)),
             4 => Box::new(GradientDescent::new(n)),
+            5 => Box::new(Boids::new(n)),
             _ => Box::new(Bouncer::new(n)),
         };
         World { sim }
@@ -1371,6 +1667,16 @@ impl World {
     /// Length of the `extra` buffer (0 when the active sim exposes none).
     pub fn extra_len(&self) -> usize {
         self.sim.extra().len()
+    }
+
+    /// Pointer to the flat velocity buffer (for drawing velocity arrows in JS).
+    pub fn vel_ptr(&self) -> *const f32 {
+        self.sim.velocities().as_ptr()
+    }
+
+    /// Length of the velocity buffer (0 when the active sim exposes none).
+    pub fn vel_len(&self) -> usize {
+        self.sim.velocities().len()
     }
 
     /// Set a tunable parameter on the active sim (id is sim-specific; 0 = G).
