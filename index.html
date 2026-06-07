@@ -2,58 +2,80 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Physics Sandbox</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
     <canvas id="scene"></canvas>
 
+    <!-- Soft inner vignette to deepen the edges (premium framing); never blocks input. -->
+    <div class="vignette" aria-hidden="true"></div>
+
+    <!-- Branded boot screen shown until the WASM engine initializes, then fades out. -->
+    <div id="loader" class="loader" role="status" aria-live="polite">
+      <div class="loader__mark" aria-hidden="true"><span></span></div>
+      <p class="loader__word">Physics&nbsp;Sandbox</p>
+      <p class="loader__sub">Initializing engine</p>
+    </div>
+
     <div id="ui">
-      <div class="panel">
-        <div class="panel__head">
-          <h1>Physics Sandbox</h1>
-          <p class="sub">Rust &middot; WebAssembly &middot; Three.js</p>
-        </div>
+      <section class="panel" aria-label="Simulation controls">
+        <header class="panel__head">
+          <h1 class="wordmark">Physics Sandbox</h1>
+          <p class="sub">Rust · WebAssembly · Three.js</p>
+        </header>
+
         <div class="panel__body">
-          <div class="seg" id="sim-switch">
+          <nav class="seg" id="sim-switch" aria-label="Choose simulation">
             <button class="seg__btn is-active" data-sim="collisions">Collisions</button>
             <button class="seg__btn" data-sim="gravity">Gravity</button>
             <button class="seg__btn" data-sim="pendulum">Pendulum</button>
             <button class="seg__btn" data-sim="cloth">Cloth</button>
+          </nav>
+
+          <div class="stats">
+            <div class="stat"><span class="stat__label">Bodies</span><span class="stat__val" id="stat-count">&mdash;</span></div>
+            <div class="stat"><span class="stat__label">FPS</span><span class="stat__val" id="stat-fps">&mdash;</span></div>
           </div>
-          <div class="row"><span>Bodies</span><span id="stat-count">&mdash;</span></div>
-          <div class="row"><span>FPS</span><span id="stat-fps">&mdash;</span></div>
-          <div class="control">
-            <label for="count-slider"><span id="count-name">Count</span> <span id="count-label">200</span></label>
-            <input id="count-slider" type="range" min="2" max="2000" step="1" value="200" />
+
+          <div class="controls">
+            <div class="control">
+              <label for="count-slider"><span id="count-name">Count</span> <span class="control__val" id="count-label">200</span></label>
+              <input id="count-slider" type="range" min="2" max="2000" step="1" value="200" />
+            </div>
+            <div class="control">
+              <label for="speed-slider">Speed <span class="control__val" id="speed-label">1.0&times;</span></label>
+              <input id="speed-slider" type="range" min="0.1" max="3" step="0.1" value="1" />
+            </div>
+            <div class="control" id="grav-row" style="display: none">
+              <label for="grav-slider"><span id="grav-name">Gravity</span> <span class="control__val" id="grav-label">1.0</span></label>
+              <input id="grav-slider" type="range" min="0" max="2" step="0.1" value="1" />
+            </div>
+            <div class="control" id="wind-row" style="display: none">
+              <label for="wind-slider"><span id="wind-name">Wind</span> <span class="control__val" id="wind-label">6.0</span></label>
+              <input id="wind-slider" type="range" min="0" max="30" step="0.5" value="6" />
+            </div>
           </div>
-          <div class="control">
-            <label for="speed-slider">Speed <span id="speed-label">1.0&times;</span></label>
-            <input id="speed-slider" type="range" min="0.1" max="3" step="0.1" value="1" />
-          </div>
-          <div class="control" id="grav-row" style="display: none">
-            <label for="grav-slider"><span id="grav-name">Gravity</span> <span id="grav-label">1.0</span></label>
-            <input id="grav-slider" type="range" min="0" max="2" step="0.1" value="1" />
-          </div>
-          <div class="control" id="wind-row" style="display: none">
-            <label for="wind-slider"><span id="wind-name">Wind</span> <span id="wind-label">6.0</span></label>
-            <input id="wind-slider" type="range" min="0" max="30" step="0.5" value="6" />
-          </div>
-          <div class="btn-row">
+
+          <div class="actions">
             <button id="btn-pause" class="btn">Pause</button>
             <button id="btn-step" class="btn">Step</button>
-          </div>
-          <div class="btn-row">
             <button id="btn-reset" class="btn">Reset</button>
             <button id="btn-view" class="btn">Reset View</button>
+            <button id="btn-pin" class="btn btn--wide" style="display: none">Pin: Corners</button>
+            <button id="btn-fullscreen" class="btn btn--wide btn--ghost">Fullscreen</button>
           </div>
-          <button id="btn-pin" class="btn" style="display: none">Pin: Corners</button>
-          <button id="btn-fullscreen" class="btn">Fullscreen</button>
         </div>
-      </div>
+      </section>
 
-      <div class="hint">Drag a body to grab &amp; throw &middot; left-drag empty space to orbit &middot; scroll to zoom</div>
+      <p class="hint">Drag a body to grab &amp; throw &middot; left-drag empty space to orbit &middot; scroll to zoom</p>
     </div>
 
     <script type="module" src="/src/main.js"></script>
