@@ -12,6 +12,7 @@ await initWasm();
 const SIMS = {
   collisions: {
     kind: 0,
+    accent: '#e0a155', // warm amber — energetic bounces
     defaultCount: 200,
     minCount: 2,
     maxCount: 2000, // uniform-grid broad-phase keeps high counts smooth
@@ -33,6 +34,7 @@ const SIMS = {
   },
   gravity: {
     kind: 1,
+    accent: '#9d8cff', // cosmic violet
     defaultCount: 500,
     minCount: 50,
     maxCount: 1500,
@@ -54,6 +56,7 @@ const SIMS = {
   },
   pendulum: {
     kind: 2,
+    accent: '#57c8c2', // teal
     defaultCount: 24, // number of pendulums (bobs = 2x this)
     minCount: 1,
     maxCount: 200,
@@ -77,6 +80,7 @@ const SIMS = {
   },
   cloth: {
     kind: 3,
+    accent: '#6ca0ff', // blue — matches the sheet
     // Count here is the grid resolution R (Rust builds an R×R sheet); the slider
     // shows it as "Resolution" and the renderer derives R = sqrt(count).
     defaultCount: 30,
@@ -151,13 +155,13 @@ scene.add(key);
 
 // --- environment: ground grid + box (sized to the boxed sim) --------------
 const ENV_BOUNDS = 4; // collisions bounds; box/grid only show for that sim
-const grid = new THREE.GridHelper(ENV_BOUNDS * 2, 20, 0x444444, 0x222222);
+const grid = new THREE.GridHelper(ENV_BOUNDS * 2, 20, 0x2a2a30, 0x161619);
 scene.add(grid);
 
 const boxGeo = new THREE.BoxGeometry(ENV_BOUNDS * 2, ENV_BOUNDS * 2, ENV_BOUNDS * 2);
 const box = new THREE.LineSegments(
   new THREE.EdgesGeometry(boxGeo),
-  new THREE.LineBasicMaterial({ color: 0x333333 }),
+  new THREE.LineBasicMaterial({ color: 0x2a2a30 }),
 );
 box.position.y = ENV_BOUNDS; // rests on the grid (floor at y = 0)
 scene.add(box);
@@ -341,6 +345,9 @@ function loadSim(nextKey) {
   simKey = nextKey;
   cfg = SIMS[nextKey];
 
+  // Restrained per-sim signature accent: drives slider fill, active tab, focus.
+  document.documentElement.style.setProperty('--accent', cfg.accent || '#6ca0ff');
+
   grid.visible = cfg.showGrid;
   box.visible = cfg.boxed;
 
@@ -376,11 +383,14 @@ function loadSim(nextKey) {
   // Pin toggle (cloth only): always starts at corners-pinned.
   pinMode = 0;
   btnPin.style.display = cfg.hasPin ? '' : 'none';
+  btnPin.classList.remove('is-on');
   if (cfg.hasPin) btnPin.textContent = 'Pin: Corners';
 
   buildWorld(cfg.defaultCount);
 
   frameCamera();
+
+  refreshFills(); // sliders were just re-min/maxed; repaint their accent fills
 
   if (cfg.hint) hintEl.textContent = cfg.hint;
   for (const b of segBtns) b.classList.toggle('is-active', b.dataset.sim === nextKey);
@@ -413,6 +423,23 @@ const hintEl = document.querySelector('.hint');
 let speed = 1; // sim-time multiplier
 let paused = false;
 let pinMode = 0; // cloth pin mode: 0 = corners, 1 = top edge
+
+// Paint a slider's accent "fill" up to its current value (CSS reads --fill for the
+// WebKit track gradient; Firefox uses native ::-moz-range-progress and ignores it).
+function setFill(el) {
+  const min = parseFloat(el.min);
+  const max = parseFloat(el.max);
+  const v = parseFloat(el.value);
+  const pct = max > min ? ((v - min) / (max - min)) * 100 : 0;
+  el.style.setProperty('--fill', `${pct}%`);
+}
+function refreshFills() {
+  for (const el of document.querySelectorAll('input[type="range"]')) setFill(el);
+}
+// One delegated listener keeps every slider's fill in sync as it's dragged.
+document.querySelector('.panel').addEventListener('input', (e) => {
+  if (e.target.matches('input[type="range"]')) setFill(e.target);
+});
 
 for (const b of segBtns) {
   b.addEventListener('click', () => loadSim(b.dataset.sim));
@@ -451,11 +478,13 @@ btnPin.addEventListener('click', () => {
   pinMode = pinMode === 0 ? 1 : 0;
   world.set_param(2, pinMode);
   btnPin.textContent = pinMode === 1 ? 'Pin: Top Edge' : 'Pin: Corners';
+  btnPin.classList.toggle('is-on', pinMode === 1);
 });
 
 btnPause.addEventListener('click', () => {
   paused = !paused;
   btnPause.textContent = paused ? 'Play' : 'Pause';
+  btnPause.classList.toggle('is-on', paused);
 });
 
 // Step: advance exactly one fixed tick and repaint (handy while paused to scrub
@@ -707,6 +736,13 @@ function schedule() {
 loadSim('collisions'); // build the initial sim + scene
 render(); // paint the first frame before the loop ticks
 schedule();
+
+// Engine is up and the first frame is on screen — fade out the boot loader.
+const loaderEl = document.getElementById('loader');
+if (loaderEl) {
+  loaderEl.classList.add('is-hidden');
+  setTimeout(() => loaderEl.remove(), 700);
+}
 
 document.addEventListener('visibilitychange', () => {
   last = performance.now(); // avoid a huge dt spike when visibility flips
