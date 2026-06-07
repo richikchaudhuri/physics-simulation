@@ -81,22 +81,23 @@ body {
   letter-spacing: 0.2em;
 }
 
-/* Boxy segmented sim switcher: shared border, inverted active tab. */
+/* Boxy segmented sim switcher: 2-col grid (wraps cleanly past two sims),
+   shared 1px separators, inverted active tab. A lone last tab spans the row. */
 .seg {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   border: 1px solid var(--line);
   margin-bottom: 14px;
 }
 
 .seg__btn {
-  flex: 1;
   background: transparent;
   border: none;
   color: var(--muted);
   font: inherit;
   font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.1em;
   padding: 8px 4px;
   cursor: pointer;
   transition:
@@ -104,8 +105,18 @@ body {
     color 0.15s ease;
 }
 
-.seg__btn + .seg__btn {
+/* Internal separators only: left edge on right-column tabs, top edge on row 2+. */
+.seg__btn:nth-child(even) {
   border-left: 1px solid var(--line);
+}
+
+.seg__btn:nth-child(n + 3) {
+  border-top: 1px solid var(--line);
+}
+
+/* An odd final tab (e.g. 3 sims) fills the whole last row. */
+.seg__btn:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
 }
 
 .seg__btn:hover {
