@@ -242,6 +242,74 @@ const box = new THREE.LineSegments(
 box.position.y = ENV_BOUNDS; // rests on the grid (floor at y = 0)
 scene.add(box);
 
+// --- backdrop: gradient skydome + starfield + depth fog -------------------
+// Without this the open sims (gravity / pendulum / cloth) float in a black void.
+// All three layers are pure decoration: a large back-side sphere with a vertical
+// gradient, a faint star shell for parallax/place, and exponential fog that fades
+// distant bodies into the backdrop. The skydome is tinted per-sim in loadSim.
+renderer.setClearColor(0x070709, 1);
+
+const BG_TOP = new THREE.Color(0x15151d);
+const BG_BOTTOM = new THREE.Color(0x050507);
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  depthWrite: false,
+  uniforms: {
+    uTop: { value: BG_TOP.clone() },
+    uBottom: { value: BG_BOTTOM.clone() },
+  },
+  vertexShader: `
+    varying vec3 vDir;
+    void main() {
+      vDir = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    varying vec3 vDir;
+    uniform vec3 uTop;
+    uniform vec3 uBottom;
+    void main() {
+      float t = clamp(normalize(vDir).y * 0.5 + 0.5, 0.0, 1.0);
+      gl_FragColor = vec4(mix(uBottom, uTop, pow(t, 0.9)), 1.0);
+    }
+  `,
+});
+const sky = new THREE.Mesh(new THREE.SphereGeometry(500, 32, 16), skyMat);
+sky.frustumCulled = false;
+scene.add(sky);
+
+scene.fog = new THREE.FogExp2(0x0a0a0f, 0.011);
+
+// Faint star shell surrounding the scene (drifts very slowly in the render loop).
+const STAR_COUNT = 1500;
+const starArr = new Float32Array(STAR_COUNT * 3);
+for (let i = 0; i < STAR_COUNT; i++) {
+  const r = 140 + Math.random() * 320; // a thick shell well behind the action
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.acos(2 * Math.random() - 1); // uniform on the sphere
+  const s = Math.sin(phi);
+  starArr[i * 3] = r * s * Math.cos(theta);
+  starArr[i * 3 + 1] = r * Math.cos(phi);
+  starArr[i * 3 + 2] = r * s * Math.sin(theta);
+}
+const starGeo = new THREE.BufferGeometry();
+starGeo.setAttribute('position', new THREE.BufferAttribute(starArr, 3));
+const stars = new THREE.Points(
+  starGeo,
+  new THREE.PointsMaterial({
+    color: 0xffffff,
+    size: 1.1,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
+    fog: false, // stars ARE the backdrop — don't let fog erase them
+  }),
+);
+stars.frustumCulled = false;
+scene.add(stars);
+
 // --- instanced spheres (unit sphere, scaled per instance) -----------------
 const sphereGeo = new THREE.SphereGeometry(1, 16, 12);
 const sphereMat = new THREE.MeshStandardMaterial({
@@ -721,6 +789,13 @@ function loadSim(nextKey, restore) {
   // Restrained per-sim signature accent: drives slider fill, active tab, focus.
   document.documentElement.style.setProperty('--accent', cfg.accent || '#6ca0ff');
 
+  // Tie the backdrop to the sim identity: nudge the skydome gradient gently toward
+  // the accent (more at the top, a whisper at the bottom) so each sim has its own
+  // atmosphere without the environment ever shouting.
+  const acc = new THREE.Color(cfg.accent || 0x6ca0ff);
+  skyMat.uniforms.uTop.value.copy(BG_TOP).lerp(acc, 0.1);
+  skyMat.uniforms.uBottom.value.copy(BG_BOTTOM).lerp(acc, 0.03);
+
   grid.visible = cfg.showGrid;
   box.visible = cfg.boxed;
 
@@ -740,7 +815,7 @@ function loadSim(nextKey, restore) {
 
   // The gravity control is shared; each sim relabels/rescales it (and a fresh
   // World starts at the matching default, so no set_param push is needed here).
-  gravRow.style.display = cfg.hasGravityParam ? '' : 'none';
+  gravRow.classList.toggle('is-collapsed', !cfg.hasGravityParam);
   if (cfg.hasGravityParam) {
     gravName.textContent = cfg.gravLabel;
     gravSlider.min = String(cfg.gravMin);
@@ -752,7 +827,7 @@ function loadSim(nextKey, restore) {
   }
 
   // Wind control (cloth only): same shared-default trick as gravity.
-  windRow.style.display = cfg.hasWind ? '' : 'none';
+  windRow.classList.toggle('is-collapsed', !cfg.hasWind);
   if (cfg.hasWind) {
     windName.textContent = cfg.windLabel;
     windSlider.min = String(cfg.windMin);
@@ -813,6 +888,11 @@ function loadSim(nextKey, restore) {
       betaLabel.textContent = betaVal.toFixed(2);
     }
   }
+  // Pin toggle (cloth only): always starts at corners-pinned.
+  pinMode = 0;
+  pinWrap.classList.toggle('is-collapsed', !cfg.hasPin);
+  btnPin.classList.remove('is-on');
+  if (cfg.hasPin) btnPin.querySelector('.lbl').textContent = 'Pin: Corners';
 
   // Velocity-arrow & trail toggles: only for sims that expose a velocity buffer.
   btnArrows.style.display = simHasVel ? '' : 'none';
@@ -854,6 +934,7 @@ function buildSelect(container, labels, activeIdx, onPick) {
     });
     container.appendChild(b);
   });
+  positionSeg();
 }
 
 // --- ui -------------------------------------------------------------------
@@ -889,7 +970,62 @@ const btnStep = document.getElementById('btn-step');
 const btnView = document.getElementById('btn-view');
 const btnFull = document.getElementById('btn-fullscreen');
 const segBtns = Array.from(document.querySelectorAll('.seg__btn'));
+const segNav = document.getElementById('sim-switch');
+const segHL = document.querySelector('.seg__hl');
+const pinWrap = document.querySelector('.pin-wrap');
 const hintEl = document.querySelector('.hint');
+
+// Position a sliding/resizing highlighter to wrap the active button in a pill nav.
+// Geometry is computed deterministically (collapsed icon width + the label's
+// natural scrollWidth) so it's correct immediately, even while the label is still
+// animating open — no measuring mid-transition. Pass activeIdx = -1 to hide it.
+function positionHL(nav, btns, hl, activeIdx) {
+  if (!nav || !hl || !btns.length) return;
+  if (activeIdx < 0) {
+    hl.style.width = '0px';
+    nav.classList.remove('has-open');
+    return;
+  }
+  nav.classList.add('has-open');
+  const ncs = getComputedStyle(nav);
+  const padL = parseFloat(ncs.paddingLeft) || 0;
+  const padT = parseFloat(ncs.paddingTop) || 0;
+  const gap = parseFloat(ncs.columnGap || ncs.gap) || 0;
+  const active = btns[activeIdx];
+  const bcs = getComputedStyle(active);
+  const ico = active.querySelector('.ico');
+  // Collapsed (icon-only) width is identical for every button and independent of
+  // any in-flight label transition, so derive it from the always-visible icon +
+  // the button's horizontal padding/border (NOT a sibling's offsetWidth, which is
+  // still mid-collapse right after a switch).
+  const iconW =
+    (ico ? ico.offsetWidth : 0) +
+    (parseFloat(bcs.paddingLeft) || 0) +
+    (parseFloat(bcs.paddingRight) || 0) +
+    (parseFloat(bcs.borderLeftWidth) || 0) +
+    (parseFloat(bcs.borderRightWidth) || 0);
+  const lbl = active.querySelector('.lbl');
+  // The label keeps its icon↔text padding even when clipped to zero width
+  // (overflow:hidden doesn't clip padding), so every collapsed pill is really
+  // iconW + that padding wide. Fold it into the per-index stride, or the
+  // highlighter drifts left of the active pill by paddingLeft × index.
+  const lblCS = lbl ? getComputedStyle(lbl) : null;
+  const lblPad = lblCS
+    ? (parseFloat(lblCS.paddingLeft) || 0) + (parseFloat(lblCS.paddingRight) || 0)
+    : 0;
+  const collapsedW = iconW + lblPad; // true icon-only pill width
+  const labelW = lbl ? lbl.scrollWidth : 0; // natural width (incl. padding) regardless of clip
+  const left = padL + activeIdx * (collapsedW + gap);
+  hl.style.transform = `translate(${left}px, ${padT}px)`;
+  hl.style.width = `${iconW + labelW}px`;
+  hl.style.height = `${active.offsetHeight}px`;
+}
+
+// Sim-mode highlighter: always tracks the currently-active mode.
+function positionSeg() {
+  const i = segBtns.findIndex((b) => b.classList.contains('is-active'));
+  positionHL(segNav, segBtns, segHL, i);
+}
 
 let speed = 1; // sim-time multiplier
 let paused = false;
@@ -924,6 +1060,17 @@ document.querySelector('.panel').addEventListener('input', (e) => {
 
 for (const b of segBtns) {
   b.addEventListener('click', () => loadSim(b.dataset.sim));
+}
+
+// Gradient Descent ships with a later engine update. Until SIMS.descent is
+// registered, present its mode button as a dimmed "coming soon" affordance
+// (loadSim already no-ops for unknown sims). Once the sim lands and registers,
+// this guard is skipped and the button activates through the normal loadSim path.
+const descentBtn = segBtns.find((b) => b.dataset.sim === 'descent');
+if (descentBtn && !SIMS.descent) {
+  descentBtn.classList.add('is-soon');
+  descentBtn.title = 'Gradient Descent — coming soon';
+  descentBtn.setAttribute('aria-disabled', 'true');
 }
 
 // Live label while dragging; rebuild only on release so we don't thrash.
@@ -1021,37 +1168,76 @@ document.addEventListener('fullscreenchange', () => {
   btnFull.setAttribute('aria-label', fsLabel);
 });
 
-// --- About / Settings modals ---------------------------------------------
-const modalAbout = document.getElementById('modal-about');
-const modalSettings = document.getElementById('modal-settings');
+// --- About / Settings disclosure (expanding pill + flow-down sheet) -------
+const disclosure = document.getElementById('disclosure');
+const navPill = disclosure.querySelector('.navpill');
+const navHL = disclosure.querySelector('.navpill__hl');
+const btnAbout = document.getElementById('btn-about');
+const btnSettings = document.getElementById('btn-settings');
+const navBtns = [btnAbout, btnSettings];
+const PANELS = {
+  about: { btn: btnAbout, sheet: document.getElementById('sheet-about') },
+  settings: { btn: btnSettings, sheet: document.getElementById('sheet-settings') },
+};
+let openPanel = null;
+const sheetTimers = new WeakMap();
 
-function openModal(m) {
-  m.hidden = false;
-  // Force a reflow before adding the class so the entrance transition runs from
-  // the hidden state (rAF would stall in a backgrounded/headless tab).
-  void m.offsetWidth;
-  m.classList.add('is-open');
-}
-function closeModal(m) {
-  m.classList.remove('is-open');
-  setTimeout(() => {
-    m.hidden = true;
-  }, 240);
+// Highlighter that slides between About and Settings (hidden when both closed).
+function positionNav() {
+  const i = navBtns.findIndex((b) => b.classList.contains('is-open'));
+  positionHL(navPill, navBtns, navHL, i);
 }
 
-document.getElementById('btn-about').addEventListener('click', () => openModal(modalAbout));
-document.getElementById('btn-settings').addEventListener('click', () => openModal(modalSettings));
-
-// Close on scrim or close-button click (both carry data-close); inside-card clicks are ignored.
-for (const m of [modalAbout, modalSettings]) {
-  m.addEventListener('click', (e) => {
-    if (e.target.closest('[data-close]')) closeModal(m);
-  });
+// Expand/collapse one panel: the pill label opens and the sheet flows down. The
+// sheet is unhidden, reflowed, then transitioned (rAF stalls in headless tabs).
+function setPanel(key, open) {
+  const p = PANELS[key];
+  if (!p) return;
+  p.btn.classList.toggle('is-open', open);
+  p.btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) {
+    clearTimeout(sheetTimers.get(p.sheet));
+    p.sheet.hidden = false;
+    void p.sheet.offsetWidth;
+    p.sheet.classList.add('is-open');
+  } else {
+    p.sheet.classList.remove('is-open');
+    sheetTimers.set(
+      p.sheet,
+      setTimeout(() => {
+        p.sheet.hidden = true;
+      }, 440),
+    );
+  }
 }
+
+function openDisclosure(key) {
+  if (openPanel && openPanel !== key) setPanel(openPanel, false);
+  openPanel = key;
+  setPanel(key, true);
+  positionNav();
+}
+
+function closeDisclosure() {
+  if (!openPanel) return;
+  setPanel(openPanel, false);
+  openPanel = null;
+  positionNav();
+}
+
+btnAbout.addEventListener('click', () =>
+  openPanel === 'about' ? closeDisclosure() : openDisclosure('about'),
+);
+btnSettings.addEventListener('click', () =>
+  openPanel === 'settings' ? closeDisclosure() : openDisclosure('settings'),
+);
+
+// A pointer-down anywhere outside the disclosure dismisses the open sheet.
+document.addEventListener('pointerdown', (e) => {
+  if (openPanel && !e.target.closest('#disclosure')) closeDisclosure();
+});
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
-  if (!modalAbout.hidden) closeModal(modalAbout);
-  if (!modalSettings.hidden) closeModal(modalSettings);
+  if (e.key === 'Escape') closeDisclosure();
 });
 
 // --- settings toggles -----------------------------------------------------
@@ -1230,6 +1416,8 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  positionSeg(); // pill geometry is layout-dependent
+  positionNav();
 });
 
 // --- speed colour maps (D43) ----------------------------------------------
@@ -1378,6 +1566,10 @@ function frame(now) {
     }
   }
   interpAlpha = acc / FIXED; // leftover fraction toward the next (unrun) step
+  // Barely-perceptible parallax on the star shell (skipped under reduce-motion).
+  if (stars && !document.body.classList.contains('reduce-motion')) {
+    stars.rotation.y = now * 0.00001;
+  }
   render();
 
   fpsFrames++;
@@ -1563,6 +1755,12 @@ loadSim(bootState ? bootState.sim : 'collisions', bootState); // build the initi
 restoring = false;
 render(); // paint the first frame before the loop ticks
 schedule();
+
+// Label widths shift when the brand/UI webfonts finish loading — re-measure the
+// sim-mode highlighter so it keeps hugging the active mode after the font swap.
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(positionSeg);
+}
 
 // Engine is up and the first frame is on screen — fade out the boot loader.
 const loaderEl = document.getElementById('loader');
