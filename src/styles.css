@@ -5,6 +5,36 @@
    gone; depth comes from translucency, blur and soft shadow instead.
    ========================================================================== */
 
+/* Rostex — display face for the wordmark (self-hosted; Vite hashes + base-paths it). */
+@font-face {
+  font-family: "Rostex";
+  src: url("./fonts/rostex-regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Rostex";
+  src: url("./fonts/rostex-oblique.otf") format("opentype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Rostex Outline";
+  src: url("./fonts/rostex-outline.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Rostex Outline";
+  src: url("./fonts/rostex-obliqueoutline.otf") format("opentype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
 :root {
   --bg: #08080a;
   --bg-hi: #14141b; /* radial-gradient highlight */
@@ -15,10 +45,12 @@
   --faint-3: rgba(255, 255, 255, 0.09); /* button hover fill */
   --panel-bg: rgba(10, 11, 15, 0.5);
   --accent: #6ca0ff; /* overridden per-sim in JS */
+  --line: rgba(255, 255, 255, 0.82); /* white framing border on UI boxes */
 
   --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
   --font-mono: ui-monospace, "SFMono-Regular", "Cascadia Code", Consolas, monospace;
+  --font-brand: "Rostex", "Instrument Serif", Georgia, serif;
 
   --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
 }
@@ -113,14 +145,14 @@ body {
 }
 
 .loader__word {
-  font-family: var(--font-display);
-  font-size: 28px;
-  letter-spacing: 0.01em;
+  font-family: var(--font-brand);
+  font-size: 34px;
+  letter-spacing: 0.03em;
   color: var(--ink);
 }
 
 .loader__sub {
-  font-size: 10px;
+  font-size: 11.5px;
   text-transform: uppercase;
   letter-spacing: 0.32em;
   color: var(--muted);
@@ -138,75 +170,386 @@ body {
   justify-content: space-between;
 }
 
-/* Frosted, borderless control surface. */
+/* Top group: stacks the chrome bar above the control panel, both left-aligned. */
+.ui-top {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  width: 100%;
+}
+
+/* Chrome bar spans the top: quick-action pill (left), About/Settings (right). */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  animation: rise 0.6s var(--ease) both;
+}
+
+/* Quick-action pill — a single rounded capsule holding two icon buttons. */
+.pill {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(16px) saturate(118%);
+  -webkit-backdrop-filter: blur(16px) saturate(118%);
+  box-shadow: 0 12px 30px -16px rgba(0, 0, 0, 0.7);
+}
+
+.pill__div {
+  width: 1px;
+  height: 24px;
+  background: var(--faint);
+}
+
+.iconbtn {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  text-decoration: none;
+  transition:
+    background 0.18s var(--ease),
+    color 0.18s var(--ease);
+}
+
+.iconbtn svg {
+  width: 30px;
+  height: 30px;
+}
+
+.iconbtn:hover {
+  color: var(--ink);
+  background: var(--faint-2);
+}
+
+.iconbtn.is-on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* About / Settings disclosure: an icon pill that expands the active label and
+   flows a content sheet down beneath it. */
+.disclosure {
+  position: relative;
+  pointer-events: auto;
+}
+
+.navpill {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(16px) saturate(118%);
+  -webkit-backdrop-filter: blur(16px) saturate(118%);
+  box-shadow: 0 12px 30px -16px rgba(0, 0, 0, 0.7);
+}
+
+/* Highlighter that slides between About and Settings (geometry set in JS). */
+.navpill__hl {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 0;
+  transition:
+    transform 0.34s var(--ease),
+    width 0.34s var(--ease),
+    opacity 0.24s var(--ease);
+}
+
+.navpill.has-open .navpill__hl {
+  opacity: 1;
+}
+
+.navpill__btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+  padding: 9px;
+  border-radius: 999px;
+  transition: color 0.18s var(--ease);
+}
+
+.navpill__btn .ico {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+.navpill__btn .lbl {
+  display: inline-block;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  padding-left: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  transition:
+    max-width 0.34s var(--ease),
+    opacity 0.28s var(--ease);
+}
+
+.navpill__btn:hover {
+  color: var(--ink);
+}
+
+.navpill__btn.is-open {
+  color: var(--accent);
+}
+
+.navpill__btn.is-open .lbl {
+  max-width: 140px;
+  opacity: 1;
+}
+
+/* Flow-down content sheet. .sheet is an animated clip; .sheet__inner is the card. */
+.sheet {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 360px;
+  max-width: calc(100vw - 52px);
+  z-index: 5;
+  pointer-events: none;
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-10px);
+  transition:
+    max-height 0.42s var(--ease),
+    opacity 0.3s var(--ease),
+    transform 0.34s var(--ease);
+}
+
+.sheet[hidden] {
+  display: none;
+}
+
+.sheet.is-open {
+  pointer-events: auto;
+  max-height: 620px;
+  opacity: 1;
+  transform: none;
+}
+
+.sheet__inner {
+  padding: 26px 26px 24px;
+  border-radius: 18px;
+  background: rgba(13, 14, 19, 0.92);
+  backdrop-filter: blur(22px) saturate(120%);
+  -webkit-backdrop-filter: blur(22px) saturate(120%);
+  border: 1px solid var(--line);
+  box-shadow: 0 30px 70px -28px rgba(0, 0, 0, 0.82);
+}
+
+.sheet__title {
+  font-family: var(--font-brand);
+  font-weight: 400;
+  font-size: 29px;
+  letter-spacing: 0.03em;
+  color: var(--ink);
+  margin-bottom: 14px;
+}
+
+.sheet__lead {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink);
+  margin-bottom: 12px;
+}
+
+.sheet__text {
+  font-size: 12.5px;
+  line-height: 1.62;
+  color: var(--muted);
+  margin-bottom: 20px;
+}
+
+.sheet__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 22px;
+}
+
+.sheet__tags span {
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 5px 11px;
+  border: 1px solid var(--faint);
+  border-radius: 999px;
+}
+
+.sheet__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 18px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background 0.18s var(--ease);
+}
+
+.sheet__link:hover {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+/* Frosted control surface with a soft white frame and rounded corners. */
 .panel {
   pointer-events: auto;
-  width: 264px;
+  width: 330px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
   background: var(--panel-bg);
   backdrop-filter: blur(16px) saturate(118%);
   -webkit-backdrop-filter: blur(16px) saturate(118%);
   box-shadow: 0 24px 60px -18px rgba(0, 0, 0, 0.7);
-  animation: rise 0.6s var(--ease) both;
+  animation: rise 0.6s 0.05s var(--ease) both;
 }
 
 .panel__head {
-  padding: 22px 24px 16px;
+  padding: 24px 26px 18px;
 }
 
 .panel__body {
-  padding: 4px 24px 22px;
+  padding: 4px 26px 24px;
 }
 
 .wordmark {
-  font-family: var(--font-display);
+  font-family: var(--font-brand);
   font-weight: 400;
-  font-size: 27px;
-  line-height: 1.05;
-  letter-spacing: 0.01em;
+  font-size: 36px;
+  line-height: 1.14;
+  letter-spacing: 0.035em;
   color: var(--ink);
 }
 
 .sub {
   margin-top: 8px;
-  font-size: 9.5px;
+  font-size: 10.5px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.26em;
 }
 
-/* --- sim switcher: understated tabs, no boxes ----------------------------- */
+/* --- sim switcher: icon pill, active mode expands to its name -------------- */
+/* Each mode is icon-only at rest; the active one reveals its label. A single
+   highlighter (.seg__hl) is positioned by JS and slides + resizes between modes. */
 .seg {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2px;
-  margin-bottom: 22px;
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin-bottom: 24px;
+}
+
+/* The sliding/resizing highlight behind the active mode (geometry set in JS). */
+.seg__hl {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 100%;
+  border-radius: 12px;
+  background: var(--faint-3);
+  box-shadow: inset 0 -2px 0 var(--accent);
+  pointer-events: none;
+  z-index: 0;
+  transition:
+    transform 0.36s var(--ease),
+    width 0.36s var(--ease);
 }
 
 .seg__btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
   background: transparent;
   border: none;
   color: var(--muted);
   font: inherit;
-  font-size: 10.5px;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  padding: 9px 6px;
   cursor: pointer;
-  border-radius: 2px;
+  padding: 11px;
+  border-radius: 12px;
+  transition: color 0.2s var(--ease);
+}
+
+.seg__btn .ico {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+/* Label is clipped to zero width at rest; expands smoothly when active. The
+   left padding (icon↔label gap) lives inside the clip so it adds no phantom
+   width while collapsed. */
+.seg__btn .lbl {
+  display: inline-block;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  white-space: nowrap;
+  padding-left: 9px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
   transition:
-    background 0.2s var(--ease),
-    color 0.2s var(--ease);
+    max-width 0.36s var(--ease),
+    opacity 0.3s var(--ease);
 }
 
 .seg__btn:hover {
   color: var(--ink);
-  background: var(--faint-2);
 }
 
 .seg__btn.is-active {
-  background: var(--faint-3);
   color: var(--ink);
-  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.seg__btn.is-active .lbl {
+  max-width: 160px;
+  opacity: 1;
 }
 
 /* --- stats: quiet editorial read-outs ------------------------------------- */
@@ -223,15 +566,15 @@ body {
 }
 
 .stat__label {
-  font-size: 9px;
+  font-size: 12.5px;
   text-transform: uppercase;
-  letter-spacing: 0.22em;
+  letter-spacing: 0.2em;
   color: var(--muted);
 }
 
 .stat__val {
   font-family: var(--font-mono);
-  font-size: 17px;
+  font-size: 27px;
   font-variant-numeric: tabular-nums;
   color: var(--ink);
 }
@@ -249,19 +592,51 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  font-size: 10px;
+  font-size: 13.5px;
   color: var(--muted);
   text-transform: uppercase;
-  letter-spacing: 0.16em;
-  margin-bottom: 11px;
+  letter-spacing: 0.14em;
+  margin-bottom: 12px;
 }
 
 .control__val {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 16px;
   letter-spacing: 0;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
+}
+
+/* Collapsible rows — per-sim controls fold away with an animated height so the
+   auto-height panel resizes smoothly when switching modes (no display:none jump).
+   max-height is a snug ceiling above the tallest single row/button. */
+.collapsible {
+  overflow: hidden;
+  max-height: 80px;
+  transition:
+    max-height 0.36s var(--ease),
+    opacity 0.3s var(--ease),
+    margin-top 0.36s var(--ease),
+    padding-top 0.36s var(--ease),
+    padding-bottom 0.36s var(--ease);
+}
+
+.collapsible.is-collapsed {
+  max-height: 0;
+  margin-top: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Pin lives in its own block (not the actions grid) so it collapses cleanly. */
+.pin-wrap {
+  margin-top: 10px;
+}
+
+.pin-wrap .btn {
+  width: 100%;
 }
 
 /* Thin track with an accent fill (--fill set per-input by JS); refined thumb
@@ -345,12 +720,12 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   border: none;
   color: var(--muted);
   font: inherit;
-  font-size: 10px;
+  font-size: 11.5px;
   font-weight: 500;
   letter-spacing: 0.04em;
-  padding: 8px 4px;
+  padding: 9px 4px;
   cursor: pointer;
-  border-radius: 2px;
+  border-radius: 9px;
   transition:
     background 0.18s var(--ease),
     color 0.18s var(--ease);
@@ -364,34 +739,72 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .select__btn.is-active {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--ink);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 /* --- action buttons ------------------------------------------------------- */
 .actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-top: 24px;
+  gap: 10px;
+  margin-top: 26px;
 }
 
 .btn {
   pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
   background: var(--faint-2);
   border: none;
   color: var(--ink);
-  padding: 11px 8px;
+  padding: 14px 10px;
   font: inherit;
-  font-size: 10px;
+  font-size: 16px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
   cursor: pointer;
-  border-radius: 2px;
+  border-radius: 13px;
   transition:
     background 0.18s var(--ease),
     color 0.18s var(--ease),
     box-shadow 0.18s var(--ease);
+}
+
+/* Leading icon inside action buttons (mutes at rest, follows text on hover/on). */
+.btn .ico {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+  transition: color 0.18s var(--ease);
+}
+
+.btn .ico svg {
+  width: 26px;
+  height: 26px;
+}
+
+.btn:hover .ico {
+  color: var(--ink);
+}
+
+.btn.is-on .ico {
+  color: var(--accent);
+}
+
+/* Pause/play icon swap: show "play" only while toggled on (paused). */
+.btn .ico--play {
+  display: none;
+}
+
+.btn.is-on .ico--pause {
+  display: none;
+}
+
+.btn.is-on .ico--play {
+  display: inline-flex;
 }
 
 .btn:hover {
@@ -408,7 +821,6 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 
 .btn--ghost {
   background: transparent;
-  box-shadow: inset 0 0 0 1px var(--faint);
 }
 
 .btn--ghost:hover {
@@ -419,23 +831,95 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .btn.is-on {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 /* --- bottom hint ---------------------------------------------------------- */
 .hint {
   align-self: center;
   pointer-events: none;
-  font-size: 10.5px;
+  font-size: 13px;
   color: var(--muted);
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   background: rgba(8, 8, 10, 0.4);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  padding: 8px 16px;
-  border-radius: 2px;
+  padding: 11px 20px;
+  border-radius: 999px;
   animation: rise 0.6s 0.1s var(--ease) both;
+}
+
+/* Settings rows + animated toggle switch (inside the Settings sheet). */
+.setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 0;
+  border-top: 1px solid var(--faint);
+  cursor: pointer;
+}
+
+.setting:first-of-type {
+  border-top: none;
+}
+
+.setting__text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.setting__name {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.setting__desc {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.setting__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.switch {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--faint);
+  transition: background 0.2s var(--ease);
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--ink);
+  transition: transform 0.2s var(--ease);
+}
+
+.setting__input:checked + .switch {
+  background: var(--accent);
+}
+
+.setting__input:checked + .switch::after {
+  transform: translateX(18px);
+}
+
+.setting__input:focus-visible + .switch {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 /* --- motion --------------------------------------------------------------- */
@@ -478,6 +962,15 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   }
 }
 
+/* Manual override from the Settings panel (independent of the OS preference). */
+body.reduce-motion *,
+body.reduce-motion *::before,
+body.reduce-motion *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+}
+
 /* --- responsive: compact bottom-sheet panel on phones --------------------- */
 @media (max-width: 560px) {
   #ui {
@@ -485,27 +978,37 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
     padding-bottom: max(14px, env(safe-area-inset-bottom));
   }
 
+  .ui-top {
+    gap: 12px;
+  }
+
+  /* Flow-down sheet fills the safe width and aligns under the nav pill. */
+  .sheet {
+    width: calc(100vw - 28px);
+    max-width: 400px;
+  }
+
   .panel {
     width: 100%;
-    max-width: 380px;
+    max-width: 400px;
     align-self: center;
   }
 
   .panel__head {
-    padding: 18px 20px 12px;
+    padding: 20px 22px 14px;
   }
 
   .panel__body {
-    padding: 4px 20px 18px;
+    padding: 4px 22px 20px;
   }
 
   .wordmark {
-    font-size: 23px;
+    font-size: 31px;
   }
 
   .hint {
-    font-size: 9px;
-    padding: 7px 12px;
+    font-size: 12px;
+    padding: 9px 14px;
     text-align: center;
   }
 }
