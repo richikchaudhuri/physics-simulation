@@ -25,6 +25,12 @@ pub trait Simulation {
     fn extra(&self) -> &[f32] {
         &[]
     }
+    /// Optional flat `[vx, vy, vz, ...]` velocity buffer (3 per body), used by JS
+    /// to draw velocity arrows. Empty when the sim has no cartesian velocities
+    /// (e.g. the angle-driven pendulum or the optimizer-driven walkers).
+    fn velocities(&self) -> &[f32] {
+        &[]
+    }
     /// Tunable parameter hook; the meaning of `id` is per-sim (e.g. 0 = G).
     fn set_param(&mut self, _id: u32, _v: f32) {}
     /// Optional scalar field sampled on a square grid (row-major), used by the
@@ -352,6 +358,9 @@ impl Simulation for Bouncer {
     fn extra(&self) -> &[f32] {
         &self.speed
     }
+    fn velocities(&self) -> &[f32] {
+        &self.vel
+    }
     fn set_param(&mut self, id: u32, v: f32) {
         if id == 0 {
             // v is a gravity multiplier (1.0 = Earth gravity, 0 = weightless).
@@ -538,6 +547,9 @@ impl Simulation for NBody {
     }
     fn extra(&self) -> &[f32] {
         &self.speed
+    }
+    fn velocities(&self) -> &[f32] {
+        &self.vel
     }
     fn set_param(&mut self, id: u32, v: f32) {
         if id == 0 {
@@ -1564,6 +1576,9 @@ impl Simulation for Boids {
     fn extra(&self) -> &[f32] {
         &self.speed
     }
+    fn velocities(&self) -> &[f32] {
+        &self.vel
+    }
     fn set_param(&mut self, id: u32, v: f32) {
         match id {
             0 => self.coh_w = v.max(0.0),          // cohesion (UI slider)
@@ -1652,6 +1667,16 @@ impl World {
     /// Length of the `extra` buffer (0 when the active sim exposes none).
     pub fn extra_len(&self) -> usize {
         self.sim.extra().len()
+    }
+
+    /// Pointer to the flat velocity buffer (for drawing velocity arrows in JS).
+    pub fn vel_ptr(&self) -> *const f32 {
+        self.sim.velocities().as_ptr()
+    }
+
+    /// Length of the velocity buffer (0 when the active sim exposes none).
+    pub fn vel_len(&self) -> usize {
+        self.sim.velocities().len()
     }
 
     /// Set a tunable parameter on the active sim (id is sim-specific; 0 = G).
