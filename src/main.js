@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { initWasm, World, makePositions, makeExtra } from './wasm.js';
+import { initWasm, World, makePositions, makeExtra, makeGrid } from './wasm.js';
 
 await initWasm();
 
@@ -113,6 +113,49 @@ const SIMS = {
     camTarget: new THREE.Vector3(0, -0.3, 0),
     hint: 'A pinned mass-spring cloth billowing in the wind · toggle Pin · left-drag to orbit',
   },
+  descent: {
+    kind: 4,
+    accent: '#7ad1a5', // mint green — the "converged" signal color
+    contour: true, // paints a top-down loss-landscape heatmap under the walkers
+    colorByLoss: true, // walker dots brighten as their loss drops
+    // "Count" is the number of optimizer walkers racing down the surface.
+    defaultCount: 12,
+    minCount: 1,
+    maxCount: 64,
+    countName: 'Walkers',
+    boxed: false,
+    showGrid: false,
+    grabbable: false, // walkers are driven by the optimizer; left-drag orbits
+    rods: false,
+    cloth: false,
+    colorBySpeed: false,
+    centralScale: 1,
+    speedScale: 1,
+    // The learning rate rides the shared "gravity" slider (set_param id 0). A
+    // per-sim decimals override keeps small rates (0.05) from rounding to "0.1".
+    hasGravityParam: true,
+    gravLabel: 'Learning rate',
+    gravMin: 0.001,
+    gravMax: 0.3,
+    gravStep: 0.001,
+    gravDefault: 0.05,
+    gravDecimals: 3,
+    // Landscape + optimizer pickers (filled into the .select navs) and the
+    // momentum/Adam β slider.
+    landscapes: ['Bowl', 'Saddle', 'Rosenbrock', 'Himmelblau', 'Rastrigin'],
+    optimizers: ['SGD', 'Momentum', 'RMSProp', 'Adam'],
+    defaultLandscape: 0, // Bowl
+    defaultOptimizer: 3, // Adam
+    hasBeta: true,
+    betaDefault: 0.9,
+    betaMin: 0,
+    betaMax: 0.999,
+    betaStep: 0.001,
+    // Straight top-down; the tiny x/z offset avoids an OrbitControls gimbal flip.
+    camPos: new THREE.Vector3(0.001, 14, 0.001),
+    camTarget: new THREE.Vector3(0, 0, 0),
+    hint: 'Optimizers race down a loss landscape · pick a function & optimizer · left-drag to orbit',
+  },
 };
 
 let simKey = 'collisions';
@@ -122,6 +165,7 @@ let cfg = SIMS[simKey];
 let world = null;
 let positions = null;
 let extra = null;
+let lossGrid = null; // loss-landscape heatmap view (gradient-descent sim only)
 let simRadius = 0.4;
 let simBounds = 4;
 let count = 0;
@@ -294,6 +338,190 @@ function updateCloth(p) {
   clothGeo.computeVertexNormals();
 }
 
+// --- gradient-descent contour heatmap (sim #4) ----------------------------
+// A flat plane lying in the XZ-plane just under the walkers, textured with the
+// loss landscape sampled by Rust. The math domain is centred on the world
+// origin and scaled to ±domain_extent, so the walkers (also in world coords)
+// land exactly on their loss value.
+let contourMesh = null;
+let contourGeo = null;
+let contourMat = null;
+let contourTex = null;
+let contourData = null; // Uint8 RGBA backing the DataTexture
+let contourDim = 0;
+// #7ad1a5 — the basin accent, premultiplied to 0..1 for blending.
+const ACCENT_RGB = [0x7a / 255, 0xd1 / 255, 0xa5 / 255];
+const ISO_BANDS = 7; // number of baked iso-contour lines
+
+function buildContour() {
+  if (contourMesh) {
+    scene.remove(contourMesh);
+    contourGeo.dispose();
+    contourTex.dispose();
+    contourMat.dispose();
+    contourMesh = null;
+  }
+  const dim = world.grid_dim();
+  const ext = world.domain_extent();
+  contourDim = dim;
+  contourData = new Uint8Array(dim * dim * 4);
+  contourTex = new THREE.DataTexture(contourData, dim, dim, THREE.RGBAFormat, THREE.UnsignedByteType);
+  contourTex.minFilter = THREE.LinearFilter;
+  contourTex.magFilter = THREE.LinearFilter;
+  contourMat = new THREE.MeshBasicMaterial({ map: contourTex }); // unlit: the heatmap IS the color
+  contourGeo = new THREE.PlaneGeometry(ext * 2, ext * 2);
+  contourMesh = new THREE.Mesh(contourGeo, contourMat);
+  contourMesh.rotation.x = -Math.PI / 2; // lie flat in the XZ-plane
+  contourMesh.position.y = -0.01; // just below the walkers/trails
+  contourMesh.frustumCulled = false;
+  scene.add(contourMesh);
+  refreshContourTexture();
+}
+
+// Repaint the heatmap from the Rust grid. Cheap dynamic-range compression (sqrt)
+// keeps high-range landscapes (Rosenbrock/Rastrigin) from washing out to a flat
+// square; baked iso-bands and a restrained basin accent add readable structure.
+// Rebuilt only on sim load + landscape change, never per frame.
+function refreshContourTexture() {
+  if (!contourMesh) return;
+  const g = lossGrid();
+  const dim = contourDim;
+  if (g.length < dim * dim) return;
+  const lo = world.loss_min();
+  const hi = world.loss_max();
+  const range = hi > lo ? hi - lo : 1;
+  for (let row = 0; row < dim; row++) {
+    // Flip V so the math-y axis aligns with world +Z (verified: Rosenbrock's
+    // valley lands where the walkers converge).
+    const gridRow = dim - 1 - row;
+    for (let col = 0; col < dim; col++) {
+      const f = g[gridRow * dim + col];
+      let t = (f - lo) / range;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      t = Math.sqrt(t); // compress the dynamic range
+      let lum = 0.06 + 0.62 * t; // dark valley -> light ridge
+      // Iso-band: a thin dark line at each evenly spaced level crossing.
+      const frac = t * ISO_BANDS - Math.floor(t * ISO_BANDS);
+      if (frac < 0.07 || frac > 0.93) lum *= 0.55;
+      // Basin accent: tint the low-loss region toward mint (strong near t=0).
+      const basin = 1 - t * 2.0;
+      const b = basin < 0 ? 0 : basin;
+      const r = lum + (ACCENT_RGB[0] - lum) * 0.3 * b;
+      const gc = lum + (ACCENT_RGB[1] - lum) * 0.3 * b;
+      const bc = lum + (ACCENT_RGB[2] - lum) * 0.3 * b;
+      const o = (row * dim + col) * 4;
+      contourData[o] = (r * 255) | 0;
+      contourData[o + 1] = (gc * 255) | 0;
+      contourData[o + 2] = (bc * 255) | 0;
+      contourData[o + 3] = 255;
+    }
+  }
+  contourTex.needsUpdate = true;
+}
+
+// Descent trails: a per-walker ring buffer of recent world positions, drawn as
+// fading line ribbons so each optimizer's path down the surface is visible.
+const TRAIL_LEN = 64;
+const TRAIL_Y = 0.005; // lift trails just above the contour plane
+let trailGeo = null;
+let trailPos = null; // Float32Array backing the LineSegments positions
+let trailCol = null; // per-vertex colors (walker hue, faded by age)
+let trailLines = null;
+let trailHist = null; // ring buffer: trailCount * TRAIL_LEN * 3 world coords
+let trailHead = 0; // next write slot in the ring
+let trailCount = 0; // walker count the buffers were sized for
+
+function buildTrails() {
+  if (trailLines) {
+    scene.remove(trailLines);
+    trailGeo.dispose();
+    trailLines = null;
+  }
+  trailCount = count;
+  const segs = TRAIL_LEN - 1;
+  const nVerts = trailCount * segs * 2; // LineSegments: 2 endpoints per segment
+  trailHist = new Float32Array(trailCount * TRAIL_LEN * 3);
+  trailPos = new Float32Array(nVerts * 3);
+  trailCol = new Float32Array(nVerts * 3);
+  trailHead = 0;
+  trailGeo = new THREE.BufferGeometry();
+  trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPos, 3));
+  trailGeo.setAttribute('color', new THREE.BufferAttribute(trailCol, 3));
+  trailLines = new THREE.LineSegments(trailGeo, rodMat); // reuse the vertex-colored line material
+  trailLines.frustumCulled = false;
+  scene.add(trailLines);
+  primeTrails();
+}
+
+// Fill every walker's whole ring with its current position, so a fresh start (or
+// a landscape/optimizer switch) doesn't draw a streak from the previous spot.
+function primeTrails() {
+  if (!trailHist) return;
+  const p = positions();
+  for (let w = 0; w < trailCount; w++) {
+    const px = p[w * 3];
+    const pz = p[w * 3 + 2];
+    for (let c = 0; c < TRAIL_LEN; c++) {
+      const h = (w * TRAIL_LEN + c) * 3;
+      trailHist[h] = px;
+      trailHist[h + 1] = TRAIL_Y;
+      trailHist[h + 2] = pz;
+    }
+  }
+  trailHead = 0;
+  rebuildTrailSegments();
+}
+
+// Record the current positions into the ring and rebuild the segment buffers.
+function updateTrails(p) {
+  if (!trailHist) return;
+  for (let w = 0; w < trailCount; w++) {
+    const h = (w * TRAIL_LEN + trailHead) * 3;
+    trailHist[h] = p[w * 3];
+    trailHist[h + 1] = TRAIL_Y;
+    trailHist[h + 2] = p[w * 3 + 2];
+  }
+  trailHead = (trailHead + 1) % TRAIL_LEN;
+  rebuildTrailSegments();
+}
+
+// Walk each ring oldest->newest, emitting line segments whose color is the
+// walker's hue dimmed by age (older = fainter). One distinct hue per walker so
+// the individual trajectories stay legible as they converge.
+function rebuildTrailSegments() {
+  const segs = TRAIL_LEN - 1;
+  let v = 0;
+  for (let w = 0; w < trailCount; w++) {
+    indexToColor(w, trailCount, tmpColor);
+    for (let c = 0; c < segs; c++) {
+      const rOld = (trailHead + c) % TRAIL_LEN;
+      const rNew = (trailHead + c + 1) % TRAIL_LEN;
+      const hOld = (w * TRAIL_LEN + rOld) * 3;
+      const hNew = (w * TRAIL_LEN + rNew) * 3;
+      const fade = (c + 1) / segs; // 0 (oldest) -> 1 (newest)
+      const o = v * 3;
+      trailPos[o] = trailHist[hOld];
+      trailPos[o + 1] = trailHist[hOld + 1];
+      trailPos[o + 2] = trailHist[hOld + 2];
+      trailPos[o + 3] = trailHist[hNew];
+      trailPos[o + 4] = trailHist[hNew + 1];
+      trailPos[o + 5] = trailHist[hNew + 2];
+      const cr = tmpColor.r * fade;
+      const cg = tmpColor.g * fade;
+      const cb = tmpColor.b * fade;
+      trailCol[o] = cr;
+      trailCol[o + 1] = cg;
+      trailCol[o + 2] = cb;
+      trailCol[o + 3] = cr;
+      trailCol[o + 4] = cg;
+      trailCol[o + 5] = cb;
+      v += 2;
+    }
+  }
+  trailGeo.attributes.position.needsUpdate = true;
+  trailGeo.attributes.color.needsUpdate = true;
+}
+
 // (Re)create the InstancedMesh for the current body count. instanceColor must
 // be fully initialized or untouched instances render black. For sims that render
 // their own geometry (cloth) the instanced spheres are built but hidden.
@@ -314,6 +542,14 @@ function buildMesh() {
 
   if (cfg.cloth) buildCloth(Math.round(Math.sqrt(count)));
   else if (clothMesh) clothMesh.visible = false;
+
+  if (cfg.contour) {
+    buildContour();
+    buildTrails();
+  } else {
+    if (contourMesh) contourMesh.visible = false;
+    if (trailLines) trailLines.visible = false;
+  }
 }
 
 // Rebuild the active sim with a new body count (slider / sim switch).
@@ -324,11 +560,15 @@ function buildWorld(n) {
   world = new World(cfg.kind, n);
   positions = makePositions(world);
   extra = makeExtra(world);
+  lossGrid = makeGrid(world);
   simRadius = world.radius();
   simBounds = world.bounds();
   count = world.count();
   buildMesh();
   statCount.textContent = count;
+  // A fresh World boots at the sim's built-in defaults; re-push the live control
+  // state so a count change (or sim load) preserves the user's selections.
+  reapplyParams();
 }
 
 // Frame the camera on the active sim (used on sim load and by Reset View).
@@ -366,7 +606,7 @@ function loadSim(nextKey) {
     gravSlider.max = String(cfg.gravMax);
     gravSlider.step = String(cfg.gravStep);
     gravSlider.value = String(cfg.gravDefault);
-    gravLabel.textContent = cfg.gravDefault.toFixed(1);
+    gravLabel.textContent = cfg.gravDefault.toFixed(cfg.gravDecimals ?? 1);
   }
 
   // Wind control (cloth only): same shared-default trick as gravity.
@@ -386,7 +626,42 @@ function loadSim(nextKey) {
   btnPin.classList.remove('is-on');
   if (cfg.hasPin) btnPin.querySelector('.lbl').textContent = 'Pin: Corners';
 
+  // Gradient-descent selector state (read by reapplyParams inside buildWorld, so
+  // it must be set BEFORE the build).
+  if (cfg.contour) {
+    landscapeIdx = cfg.defaultLandscape ?? 0;
+    optimizerIdx = cfg.defaultOptimizer ?? 3;
+    betaVal = cfg.betaDefault ?? 0.9;
+  }
+
   buildWorld(cfg.defaultCount);
+
+  // Landscape / optimizer / beta controls (gradient-descent only). Built AFTER
+  // buildWorld so `world` exists for the pick handlers.
+  const isContour = !!cfg.contour;
+  landscapeRow.style.display = isContour ? '' : 'none';
+  optimizerRow.style.display = isContour ? '' : 'none';
+  betaRow.style.display = isContour && cfg.hasBeta ? '' : 'none';
+  if (isContour) {
+    buildSelect(landscapeNav, cfg.landscapes, landscapeIdx, (i) => {
+      landscapeIdx = i;
+      world.set_param(1, i); // rebuilds the grid + re-seeds walkers in Rust
+      refreshContourTexture();
+      primeTrails();
+    });
+    buildSelect(optimizerNav, cfg.optimizers, optimizerIdx, (i) => {
+      optimizerIdx = i;
+      world.set_param(2, i); // re-seeds for a fair restart
+      primeTrails();
+    });
+    if (cfg.hasBeta) {
+      betaSlider.min = String(cfg.betaMin);
+      betaSlider.max = String(cfg.betaMax);
+      betaSlider.step = String(cfg.betaStep);
+      betaSlider.value = String(betaVal);
+      betaLabel.textContent = betaVal.toFixed(2);
+    }
+  }
 
   frameCamera();
 
@@ -394,6 +669,23 @@ function loadSim(nextKey) {
 
   if (cfg.hint) hintEl.textContent = cfg.hint;
   for (const b of segBtns) b.classList.toggle('is-active', b.dataset.sim === nextKey);
+}
+
+// Fill a `.select` nav with one borderless button per label; clicking re-marks
+// the active button and fires `onPick(index)`.
+function buildSelect(container, labels, activeIdx, onPick) {
+  container.innerHTML = '';
+  labels.forEach((label, i) => {
+    const b = document.createElement('button');
+    b.className = 'select__btn' + (i === activeIdx ? ' is-active' : '');
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      for (const c of container.children) c.classList.remove('is-active');
+      b.classList.add('is-active');
+      onPick(i);
+    });
+    container.appendChild(b);
+  });
 }
 
 // --- ui -------------------------------------------------------------------
@@ -412,6 +704,13 @@ const windSlider = document.getElementById('wind-slider');
 const windLabel = document.getElementById('wind-label');
 const windName = document.getElementById('wind-name');
 const windRow = document.getElementById('wind-row');
+const landscapeRow = document.getElementById('landscape-row');
+const landscapeNav = document.getElementById('landscape-nav');
+const optimizerRow = document.getElementById('optimizer-row');
+const optimizerNav = document.getElementById('optimizer-nav');
+const betaRow = document.getElementById('beta-row');
+const betaSlider = document.getElementById('beta-slider');
+const betaLabel = document.getElementById('beta-label');
 const btnPin = document.getElementById('btn-pin');
 const btnPause = document.getElementById('btn-pause');
 const btnStep = document.getElementById('btn-step');
@@ -423,6 +722,9 @@ const hintEl = document.querySelector('.hint');
 let speed = 1; // sim-time multiplier
 let paused = false;
 let pinMode = 0; // cloth pin mode: 0 = corners, 1 = top edge
+let landscapeIdx = 0; // gradient-descent: selected loss landscape
+let optimizerIdx = 3; // gradient-descent: selected optimizer (default Adam)
+let betaVal = 0.9; // gradient-descent: momentum / Adam beta1
 
 // Paint a slider's accent "fill" up to its current value (CSS reads --fill for the
 // WebKit track gradient; Firefox uses native ::-moz-range-progress and ignores it).
@@ -460,9 +762,10 @@ speedSlider.addEventListener('input', () => {
 
 gravSlider.addEventListener('input', () => {
   const g = parseFloat(gravSlider.value);
-  gravLabel.textContent = g.toFixed(1);
+  gravLabel.textContent = g.toFixed(cfg.gravDecimals ?? 1);
   // id 0 is each sim's primary tunable: gravity multiplier (collisions),
-  // gravitational constant G (n-body), or gravity g (pendulum / cloth).
+  // gravitational constant G (n-body), gravity g (pendulum / cloth), or the
+  // learning rate (gradient descent).
   world.set_param(0, g);
 });
 
@@ -471,6 +774,13 @@ windSlider.addEventListener('input', () => {
   const w = parseFloat(windSlider.value);
   windLabel.textContent = w.toFixed(1);
   world.set_param(1, w);
+});
+
+// Momentum / Adam beta1 (gradient descent): id 3.
+betaSlider.addEventListener('input', () => {
+  betaVal = parseFloat(betaSlider.value);
+  betaLabel.textContent = betaVal.toFixed(2);
+  world.set_param(3, betaVal);
 });
 
 // Pin mode toggle (cloth): id 2, 0 = corners, 1 = whole top edge.
@@ -572,6 +882,15 @@ function reapplyParams() {
   if (cfg.hasGravityParam) world.set_param(0, parseFloat(gravSlider.value));
   if (cfg.hasWind) world.set_param(1, parseFloat(windSlider.value));
   if (cfg.hasPin) world.set_param(2, pinMode);
+  // Gradient descent: id 1 = landscape, id 2 = optimizer, id 3 = beta. (These
+  // never collide with wind/pin: contour sims set neither hasWind nor hasPin.)
+  if (cfg.contour) {
+    world.set_param(1, landscapeIdx);
+    world.set_param(2, optimizerIdx);
+    if (cfg.hasBeta) world.set_param(3, betaVal);
+    refreshContourTexture();
+    primeTrails();
+  }
 }
 
 document.getElementById('btn-reset').addEventListener('click', () => {
@@ -717,6 +1036,15 @@ function speedToColor(t, out) {
   return out.setHSL(0.62 - 0.54 * t, 0.72, 0.38 + 0.34 * t);
 }
 
+// Map a walker's loss to a color: low loss -> bright mint (converged), high loss
+// -> dim grey. sqrt-compressed so a wide loss range still spreads visibly.
+function lossToColor(loss, lo, hi, out) {
+  let t = hi > lo ? (loss - lo) / (hi - lo) : 0;
+  t = clamp(t, 0, 1);
+  t = Math.sqrt(t);
+  return out.setHSL(0.41, 0.55 * (1 - t) + 0.05, 0.66 - 0.46 * t);
+}
+
 // --- render + fixed-timestep loop -----------------------------------------
 const FIXED = 1 / 120;
 let last = performance.now();
@@ -726,11 +1054,15 @@ let fpsFrames = 0;
 
 function render() {
   const p = positions(); // re-fetched AFTER stepping (step may reallocate)
-  const ex = cfg.colorBySpeed ? extra() : null;
+  const byLoss = cfg.colorByLoss;
+  const ex = cfg.colorBySpeed || byLoss ? extra() : null;
   const byIndex = cfg.colorByIndex;
   const recolor = ex || byIndex;
   const cs = cfg.centralScale;
   const pend = count / 2; // only used for pendulum index coloring
+  // Loss range for color normalization (WASM calls — hoisted out of the loop).
+  const lossLo = byLoss ? world.loss_min() : 0;
+  const lossHi = byLoss ? world.loss_max() : 1;
   // Cloth renders its own mesh; the instanced spheres stay hidden, so skip them.
   if (cfg.bobs !== false) {
     for (let i = 0; i < count; i++) {
@@ -741,7 +1073,8 @@ function render() {
       mesh.setMatrixAt(i, dummy.matrix);
       if (recolor) {
         if (i === grabbed) tmpColor.copy(HELD_COLOR);
-        else if (ex) speedToColor(ex[i] / cfg.speedScale, tmpColor);
+        else if (byLoss) lossToColor(ex[i], lossLo, lossHi, tmpColor);
+        else if (cfg.colorBySpeed) speedToColor(ex[i] / cfg.speedScale, tmpColor);
         else indexToColor((i / 2) | 0, pend, tmpColor); // two bobs share a pendulum hue
         mesh.setColorAt(i, tmpColor);
       }
@@ -751,6 +1084,7 @@ function render() {
   }
   if (cfg.rods && rodLines) updateRods(p);
   if (cfg.cloth && clothMesh) updateCloth(p);
+  if (cfg.contour && trailLines) updateTrails(p);
   controls.update();
   renderer.render(scene, camera);
 }
@@ -941,8 +1275,92 @@ if (import.meta.env.DEV) {
         maxSpeed,
         spreadXY,
         extraLen: ex.length,
+        gridLen: world.grid_len(),
+        gridDim: world.grid_dim(),
         first: [p[0], p[1], p[2]],
       };
+    },
+    // Advance the gradient-descent sim and report convergence: best-walker loss
+    // at start vs end, the largest single-step rise in best-loss (should be ~0),
+    // the best walker's world position, and the heatmap metadata.
+    descent(steps = 200) {
+      const bestLoss = () => {
+        const e = extra();
+        let m = Infinity;
+        for (let i = 0; i < e.length; i++) if (e[i] < m) m = e[i];
+        return m;
+      };
+      const startBest = bestLoss();
+      let prevBest = startBest;
+      let maxIncrease = 0;
+      for (let s = 0; s < steps; s++) {
+        world.step(FIXED);
+        const b = bestLoss();
+        if (b - prevBest > maxIncrease) maxIncrease = b - prevBest;
+        prevBest = b;
+      }
+      render();
+      const exF = extra();
+      let finalBest = Infinity;
+      let bestIdx = 0;
+      for (let i = 0; i < exF.length; i++) {
+        if (exF[i] < finalBest) {
+          finalBest = exF[i];
+          bestIdx = i;
+        }
+      }
+      const p = positions();
+      let nan = false;
+      for (let i = 0; i < count * 3; i++) if (!Number.isFinite(p[i])) nan = true;
+      return {
+        sim: simKey,
+        landscape: landscapeIdx,
+        optimizer: optimizerIdx,
+        startBest,
+        finalBest,
+        maxIncrease,
+        bestWorld: [p[bestIdx * 3], p[bestIdx * 3 + 1], p[bestIdx * 3 + 2]],
+        gridLen: world.grid_len(),
+        gridDim: world.grid_dim(),
+        lossMin: world.loss_min(),
+        lossMax: world.loss_max(),
+        nan,
+      };
+    },
+    // Heatmap + trail diagnostics: texel spread (non-uniform?), and the largest
+    // trail segment right after a prime (should be ~0 → no teleport streak).
+    contour() {
+      if (!contourData) return { hasContour: false };
+      let lumMin = 255;
+      let lumMax = 0;
+      const seen = new Set();
+      for (let i = 0; i < contourData.length; i += 4) {
+        const l = contourData[i];
+        if (l < lumMin) lumMin = l;
+        if (l > lumMax) lumMax = l;
+        seen.add(l);
+      }
+      let maxSeg = 0;
+      if (trailPos) {
+        for (let o = 0; o < trailPos.length; o += 6) {
+          const dx = trailPos[o + 3] - trailPos[o];
+          const dz = trailPos[o + 5] - trailPos[o + 2];
+          const d = Math.hypot(dx, dz);
+          if (d > maxSeg) maxSeg = d;
+        }
+      }
+      return { hasContour: true, texelMin: lumMin, texelMax: lumMax, distinctLum: seen.size, maxTrailSeg: maxSeg };
+    },
+    setLandscape(i) {
+      landscapeIdx = i;
+      world.set_param(1, i);
+      refreshContourTexture();
+      primeTrails();
+    },
+    setOptimizer(i) {
+      optimizerIdx = i;
+      world.set_param(2, i);
+      primeTrails();
     },
   };
 }

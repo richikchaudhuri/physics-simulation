@@ -54,3 +54,12 @@ export function makeExtra(world) {
     () => world.extra_len(),
   );
 }
+
+// Live view over the gradient-descent sim's loss-landscape heatmap field
+// (GRID_N*GRID_N samples, row-major). Empty for every other sim.
+export function makeGrid(world) {
+  return makeFloatView(
+    () => world.grid_ptr(),
+    () => world.grid_len(),
+  );
+}
