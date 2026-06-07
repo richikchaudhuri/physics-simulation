@@ -1078,6 +1078,7 @@ setMotion.addEventListener('change', () => {
 // Re-push the current slider/toggle state onto a freshly-built World (reset spins
 // up a new sim at its built-in defaults, which can drift from the live controls).
 function reapplyParams() {
+  resetInterp(); // positions just snapped (rebuild / reset) — don't lerp across them
   if (cfg.hasGravityParam) world.set_param(0, parseFloat(gravSlider.value));
   if (cfg.hasWind) world.set_param(1, parseFloat(windSlider.value));
   if (cfg.hasPin) world.set_param(2, pinMode);
@@ -1283,8 +1284,39 @@ let acc = 0;
 let fpsTime = 0;
 let fpsFrames = 0;
 
+// Frame interpolation. Physics runs at a fixed 120 Hz, but the display may
+// refresh faster (144 / 165 / 240 Hz). Rendering the raw sim state would repeat
+// whole frames whenever the monitor outruns the tick — uneven judder that reads
+// as "not really 144". Instead we keep the previous and current physics states
+// and render the lerp between them by the leftover-accumulator fraction, so
+// motion is smooth at any refresh rate without paying for extra physics steps.
+let posPrev = null; // flat positions snapshot BEFORE the most recent step
+let posCur = null; //  flat positions snapshot AFTER the most recent step
+let posLerp = null; // interpolated buffer handed to render()
+let interpLen = 0; //  length the three buffers are sized to
+let interpAlpha = 1; // fraction in [0,1) from posPrev toward posCur
+
+// Drop the cached states so the next stepped frame re-snapshots from the live
+// buffer. Called on every world (re)build / reset / count change to prevent a
+// one-frame lerp across stale positions (which would flash the old layout).
+function resetInterp() {
+  interpLen = 0;
+  interpAlpha = 1;
+}
+
 function render() {
-  const p = positions(); // re-fetched AFTER stepping (step may reallocate)
+  // Hand downstream a smoothed position buffer between physics steps. Fall back
+  // to the live state while paused, while dragging (so the held body tracks the
+  // pointer exactly), or before any step has populated the snapshots.
+  let p;
+  if (interpLen && posLerp && !paused && grabbed < 0 && interpAlpha < 1) {
+    const a = interpAlpha < 0 ? 0 : interpAlpha;
+    const b = 1 - a;
+    for (let i = 0; i < interpLen; i++) posLerp[i] = posPrev[i] * b + posCur[i] * a;
+    p = posLerp;
+  } else {
+    p = positions(); // re-fetched AFTER stepping (step may reallocate)
+  }
   const byLoss = cfg.colorByLoss;
   const ex = cfg.colorBySpeed || byLoss ? extra() : null;
   const byIndex = cfg.colorByIndex;
@@ -1330,10 +1362,22 @@ function frame(now) {
   } else {
     acc += dt * speed;
     while (acc >= FIXED) {
+      const before = positions();
+      if (before.length !== interpLen) {
+        // (Re)size snapshots to the live buffer — only changes on sim load /
+        // count change; a step's realloc moves the pointer but keeps the length.
+        interpLen = before.length;
+        posPrev = new Float32Array(interpLen);
+        posCur = new Float32Array(interpLen);
+        posLerp = new Float32Array(interpLen);
+      }
+      posPrev.set(before);
       world.step(FIXED);
       acc -= FIXED;
+      posCur.set(positions());
     }
   }
+  interpAlpha = acc / FIXED; // leftover fraction toward the next (unrun) step
   render();
 
   fpsFrames++;
@@ -1872,6 +1916,34 @@ if (import.meta.env.DEV) {
         }
       }
       return { maxArrow, maxTrailSeg };
+    },
+    interp(idx = 0) {
+      // Prove the frame-interpolation snapshots capture motion and the lerp lands
+      // between them (smoothing math), and that the current state has no NaN.
+      const len = interpLen;
+      if (!len || !posPrev || !posCur) return { len, alpha: interpAlpha, ready: false };
+      const i = Math.min(Math.max(idx, 0) * 3, len - 3);
+      const a = interpAlpha < 0 ? 0 : interpAlpha > 1 ? 1 : interpAlpha;
+      const lerpX = posPrev[i] * (1 - a) + posCur[i] * a;
+      const lo = Math.min(posPrev[i], posCur[i]) - 1e-6;
+      const hi = Math.max(posPrev[i], posCur[i]) + 1e-6;
+      let nan = false;
+      for (let k = 0; k < len; k++)
+        if (!Number.isFinite(posCur[k])) {
+          nan = true;
+          break;
+        }
+      return {
+        len,
+        alpha: a,
+        prevX: posPrev[i],
+        curX: posCur[i],
+        lerpX,
+        moved: Math.abs(posCur[i] - posPrev[i]),
+        between: lerpX >= lo && lerpX <= hi,
+        nan,
+        ready: true,
+      };
     },
   };
 }
